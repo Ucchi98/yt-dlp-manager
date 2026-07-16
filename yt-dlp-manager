@@ -1,15 +1,36 @@
 #!/usr/local/bin/bash
 
 # ==========================================
-# 共通設定 (デフォルト値)
+# 共通設定 (固定値および外部設定の読み込み)
 # ==========================================
-DB_PATH="${HOME}/.config/yt-dlp/url.db"
-INTERVAL=60 
+# スクリプトが使用する固定の管理ディレクトリ
+APP_DIR="${HOME}/.config/yt-dlp-manager"
 
-DEB="/compat/linux"
-VENV="${DEB}/opt/yt-dlp-env"
-YTDLP_BIN="${VENV}/bin/yt-dlp"
-DENO_BIN="/usr/local/bin/deno"
+# 設定ファイルのパス
+CONFIG_FILE="${APP_DIR}/yt-dlp-manager.cfg"
+
+# データベースファイルのパスは APP_DIR 固定とする
+DB_PATH="${APP_DIR}/queue.db"
+
+# 元のスクリプトの値をベースとしたデフォルト値（フォールバック用）
+DEFAULT_YTDLP_BIN="/usr/local/bin/yt-dlp"
+DEFAULT_DENO_BIN="/usr/local/bin/deno"
+DEFAULT_FFMPEG_DIR="/usr/local/bin"
+DEFAULT_OUTPUT_TEMPLATE="%(title).200B_%(resolution)s [%(id)s].%(ext)s"
+
+INTERVAL=5
+
+# 設定ファイルが存在すれば読み込む (source)
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# 設定ファイルが無い場合、またはファイル内で値が設定されていない（空）場合、
+# デフォルト値が代入。
+: "${YTDLP_BIN:=$DEFAULT_YTDLP_BIN}"
+: "${DENO_BIN:=$DEFAULT_DENO_BIN}"
+: "${FFMPEG_DIR:=$DEFAULT_FFMPEG_DIR}"
+: "${OUTPUT_TEMPLATE:=$DEFAULT_OUTPUT_TEMPLATE}"
 
 CURRENT_PROCESSING_ID=""
 TARGET_RUN_IDS="" # デーモンに処理させるIDのSQL用リスト
@@ -18,6 +39,51 @@ VERBOSE_MODE=0    # デバッグログフラグの初期化
 # ==========================================
 # 共通関数・ID展開ロジック
 # ==========================================
+bootstrap_application() {
+    # 1. アプリケーションの管理ディレクトリが存在することを確認・作成
+    if [ ! -d "$APP_DIR" ]; then
+        mkdir -p "$APP_DIR"
+    fi
+    
+    # 2. 初回起動時などで設定ファイルがない場合、説明付きのコメントアウトテンプレートを作成
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat <<'EOF' > "$CONFIG_FILE"
+# ==========================================
+# yt-dlp-manager 外部設定ファイル
+# ==========================================
+# [利用方法]
+# すべての設定値は初期状態でコメントアウト（無効化）されています。
+# 独自のパスやテンプレートに変更したい項目のみ、行頭の「#」を削除して
+# 設定値を書き換えてください。コメントアウトされている間は、
+# スクリプト内の標準デフォルト値が自動的に使用されます。
+
+# ------------------------------------------
+# 1. yt-dlp バイナリの絶対パス
+# ------------------------------------------
+# [標準デフォルト値]: /usr/local/bin/yt-dlp
+#YTDLP_BIN="/usr/local/bin/yt-dlp"
+
+# ------------------------------------------
+# 2. Deno バイナリの絶対パス
+# ------------------------------------------
+# [標準デフォルト値]: /usr/local/bin/deno
+#DENO_BIN="/usr/local/bin/deno"
+
+# ------------------------------------------
+# 3. ffmpeg の設置ディレクトリ（親フォルダ）
+# ------------------------------------------
+# [標準デフォルト値]: /usr/local/bin
+#FFMPEG_DIR="/usr/local/bin"
+
+# ------------------------------------------
+# 4. 動画保存時の出力ファイル名テンプレート
+# ------------------------------------------
+# [標準デフォルト値]: %(title).200B_%(resolution)s [%(id)s].%(ext)s
+#OUTPUT_TEMPLATE="%(title).200B_%(resolution)s [%(id)s].%(ext)s"
+EOF
+    fi
+}
+
 check_db_exists() {
     if [ ! -f "$DB_PATH" ]; then
         echo "Error: Database file not found at $DB_PATH" >&2
@@ -27,11 +93,10 @@ check_db_exists() {
 }
 
 init_database() {
+    # bootstrap_application が先に実行されているため、APP_DIR は必ず存在します
     if [ ! -f "$DB_PATH" ]; then
-        mkdir -p "$(dirname "$DB_PATH")"
         sqlite3 "$DB_PATH" "CREATE TABLE t_url (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, url TEXT NOT NULL UNIQUE, base_dir TEXT NOT NULL, done INTEGER DEFAULT 0, created_at TEXT DEFAULT (DATETIME('now', 'localtime')), processed_at TEXT);"
     fi
-    # 読みやすく独立した設定として記述
     sqlite3 "$DB_PATH" "PRAGMA busy_timeout = 5000;"
     sqlite3 "$DB_PATH" "PRAGMA journal_mode = WAL;"
 }
@@ -83,9 +148,15 @@ parse_and_expand_ids() {
     # 2. 【最適化】重複を排除しつつ、1回のSQL接続で実在するものだけを高速フィルタリング
     local sql_in_list=$(printf ", %s" "${expanded_ids[@]}")
     sql_in_list=${sql_in_list:2}
-    
+   
+    # -s モードの時だけ、done が 1（完了）と 2（処理中）のタスクを除外する条件句を作る
+    local s_mode_filter=""
+    if [ "${PURE_ARGS[0]}" = "-s" ] || [ "${PURE_ARGS[0]}" = "--start" ]; then
+        s_mode_filter="AND done NOT IN (1, 2)"
+    fi
+
     local valid_ids
-    valid_ids=$(sqlite3 "$DB_PATH" "SELECT id FROM t_url WHERE id IN ($sql_in_list) ORDER BY id ASC;" | xargs)
+    valid_ids=$(sqlite3 "$DB_PATH" "SELECT id FROM t_url WHERE id IN ($sql_in_list) ${s_mode_filter} ORDER BY id ASC;" | xargs)
 
     if [ -n "$valid_ids" ]; then
         # スペース区切りをカンマ区切りに置換して出力（例: "1 2 5" -> "1, 2, 5"）
@@ -147,11 +218,11 @@ execute_external_process() {
         --js-runtimes "deno:${DENO_BIN}"
         --merge-output-format mp4
         --part
-        --ffmpeg-location=/usr/local/bin
-        --ppa "ffmpeg:-c:v copy -c:a copy"
+        --ffmpeg-location "$FFMPEG_DIR"       # ★設定値から読み込むように変更
+        --ppa="ffmpeg:-c:v copy -c:a copy"    # ★イコール結合でパースエラーを防止
         -P "$target_dir"
-        -o "%(title).200B_%(resolution)s [%(id)s].%(ext)s"
-        --add-header Accept-Language:ja-JP
+        -o "$OUTPUT_TEMPLATE"                 # ★設定値から読み込むように変更
+        --add-header "Accept-Language:ja-JP"
         --progress
         --extractor-args "generic:impersonate"
         --socket-timeout 300
@@ -431,6 +502,8 @@ handle_immediate_shutdown() {
     exit 130
 }
 trap handle_immediate_shutdown SIGINT SIGTERM
+
+bootstrap_application
 
 # ==========================================
 # 先行オプション事前解析 (プリパース)
