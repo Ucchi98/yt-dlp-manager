@@ -1,0 +1,539 @@
+#!/usr/local/bin/bash
+
+# ==========================================
+# 共通設定 (デフォルト値)
+# ==========================================
+DB_PATH="${HOME}/.config/yt-dlp/url.db"
+INTERVAL=60 
+
+DEB="/compat/linux"
+VENV="${DEB}/opt/yt-dlp-env"
+YTDLP_BIN="${VENV}/bin/yt-dlp"
+DENO_BIN="/usr/local/bin/deno"
+
+CURRENT_PROCESSING_ID=""
+TARGET_RUN_IDS="" # デーモンに処理させるIDのSQL用リスト
+VERBOSE_MODE=0    # デバッグログフラグの初期化
+
+# ==========================================
+# 共通関数・ID展開ロジック
+# ==========================================
+check_db_exists() {
+    if [ ! -f "$DB_PATH" ]; then
+        echo "Error: Database file not found at $DB_PATH" >&2
+        echo "Please run this script as daemon mode (-s) first to initialize." >&2
+        exit 1
+    fi
+}
+
+init_database() {
+    if [ ! -f "$DB_PATH" ]; then
+        mkdir -p "$(dirname "$DB_PATH")"
+        sqlite3 "$DB_PATH" "CREATE TABLE t_url (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, url TEXT NOT NULL UNIQUE, base_dir TEXT NOT NULL, done INTEGER DEFAULT 0, created_at TEXT DEFAULT (DATETIME('now', 'localtime')), processed_at TEXT);"
+    fi
+    # 読みやすく独立した設定として記述
+    sqlite3 "$DB_PATH" "PRAGMA busy_timeout = 5000;"
+    sqlite3 "$DB_PATH" "PRAGMA journal_mode = WAL;"
+}
+
+parse_and_expand_ids() {
+    local id_input="$1"
+    local expanded_ids=()
+    check_db_exists
+
+    # 1. コンマとコロンの範囲指定をすべて展開
+    IFS=',' read -r -a id_parts <<< "$id_input"
+    for part in "${id_parts[@]}"; do
+        part=$(echo "$part" | xargs)
+        [ -z "$part" ] && continue
+        
+        if [[ "$part" =~ : ]]; then
+            local start_id=$(echo "$part" | cut -d':' -f1)
+            local end_id=$(echo "$part" | cut -d':' -f2)
+            
+            if [ -z "$start_id" ]; then
+                start_id=$(sqlite3 "$DB_PATH" "SELECT MIN(id) FROM t_url;")
+            fi
+            if [ -z "$end_id" ]; then
+                end_id=$(sqlite3 "$DB_PATH" "SELECT MAX(id) FROM t_url;")
+            fi
+            if [ -z "$start_id" ] || [ -z "$end_id" ]; then
+                continue
+            fi
+            
+            if [ "$start_id" -gt "$end_id" ]; then
+                local tmp=$start_id
+                start_id=$end_id
+                end_id=$tmp
+            fi
+            for ((id=start_id; id<=end_id; id++)); do
+                expanded_ids+=("$id")
+            done
+        elif [[ "$part" =~ ^[0-9]+$ ]]; then
+            expanded_ids+=("$part")
+        else
+            echo "Error: Invalid ID format '$part'." >&2
+            return 1
+        fi
+    done
+
+    # 展開されたIDが1つもない場合は終了
+    [ ${#expanded_ids[@]} -eq 0 ] && return 0
+
+    # 2. 【最適化】重複を排除しつつ、1回のSQL接続で実在するものだけを高速フィルタリング
+    local sql_in_list=$(printf ", %s" "${expanded_ids[@]}")
+    sql_in_list=${sql_in_list:2}
+    
+    local valid_ids
+    valid_ids=$(sqlite3 "$DB_PATH" "SELECT id FROM t_url WHERE id IN ($sql_in_list) ORDER BY id ASC;" | xargs)
+
+    if [ -n "$valid_ids" ]; then
+        # スペース区切りをカンマ区切りに置換して出力（例: "1 2 5" -> "1, 2, 5"）
+        echo "${valid_ids// /, }"
+    fi
+}
+
+# 削除と修正における、生存・処理中(done=2)のロック確認を一括代行
+validate_and_filter_active_ids() {
+    local id_list_sql="$1"
+    local filtered_ids=()
+    IFS=',' read -r -a id_parts <<< "${id_list_sql//,/\ }"
+    
+    for id in "${id_parts[@]}"; do
+        id=$(echo "$id" | xargs)
+        local row=$(sqlite3 "$DB_PATH" "SELECT done FROM t_url WHERE id = $id;" | xargs)
+        
+        if [ -z "$row" ]; then
+            continue # 存在しない行は静かにスキップ
+        elif [ "$row" = "2" ]; then
+            echo "Notice: ID $id is currently [Processing]. Skipped."
+            continue
+        fi
+        filtered_ids+=("$id")
+    done
+    
+    if [ ${#filtered_ids[@]} -eq 0 ]; then
+        echo "" 
+    else
+        local result=$(printf ", %s" "${filtered_ids[@]}")
+        echo "${result:2}"
+    fi
+}
+
+# ==========================================
+# デーモン用関数
+# ==========================================
+recover_interrupted_tasks() {
+    echo "Checking for interrupted tasks from previous run..."
+    local sql_cmd="UPDATE t_url SET done = -1, processed_at = DATETIME('now', 'localtime') WHERE done = 2"
+    if [ -n "$TARGET_RUN_IDS" ]; then
+        sql_cmd="$sql_cmd AND id IN ($TARGET_RUN_IDS);"
+    else
+        sql_cmd="$sql_cmd;"
+    fi
+    sqlite3 "$DB_PATH" "$sql_cmd"
+}
+
+execute_external_process() {
+    local id="$1" channel="$2" url="$3" record_base_dir="$4"
+    local target_dir="${record_base_dir}/${channel}"
+
+    echo "Processing ID: $id | Channel: $channel | URL: $url | Path: $target_dir"
+
+    local ARGS=(
+        -t sleep
+        --cookies "${HOME}/.config/yt-dlp/cookies.txt"
+        --remote-components ejs:github
+        --js-runtimes "deno:${DENO_BIN}"
+        --merge-output-format mp4
+        --part
+        --ffmpeg-location=/usr/local/bin
+        --ppa "ffmpeg:-c:v copy -c:a copy"
+        -P "$target_dir"
+        -o "%(title).200B_%(resolution)s [%(id)s].%(ext)s"
+        --add-header Accept-Language:ja-JP
+        --progress
+        --extractor-args "generic:impersonate"
+        --socket-timeout 300
+    )
+
+    if [ "$VERBOSE_MODE" -eq 1 ]; then
+        ARGS+=("--verbose")
+        echo "--- yt-dlp Debug Log Start (ID: $id) ---"
+    else
+        ARGS+=("-q")
+    fi
+
+    "${YTDLP_BIN}" "${ARGS[@]}" "$url"
+    local status=$?
+    if [ "$VERBOSE_MODE" -eq 1 ]; then
+        echo "--- yt-dlp Debug Log End (Exit Code: $status) ---"
+    fi
+    return $status
+}
+
+run_daemon_loop() {
+    echo "Daemon started. Listening to database..."
+    if [ "$VERBOSE_MODE" -eq 1 ]; then
+        echo "【デバッグモード有効】yt-dlpの全出力ログを表示します。"
+    fi
+    if [ -n "$TARGET_RUN_IDS" ]; then
+        echo "実際に存在する以下のIDのみを限定処理します: $TARGET_RUN_IDS"
+    fi
+
+    while true; do
+        local sql_query="SELECT id FROM t_url WHERE done IN (0, -1, 3)"
+        if [ -n "$TARGET_RUN_IDS" ]; then
+            sql_query="$sql_query AND id IN ($TARGET_RUN_IDS)"
+        fi
+        sql_query="$sql_query ORDER BY id ASC LIMIT 1;"
+
+        local target_id=$(sqlite3 "$DB_PATH" "$sql_query")
+        if [ -z "$target_id" ]; then
+            if [ -n "$TARGET_RUN_IDS" ]; then
+                echo "指定されたすべてのタスクの処理が完了、または対象がありません。デーモンを終了します。"
+                exit 0
+            fi
+            sleep "$INTERVAL"
+            continue
+        fi
+
+        CURRENT_PROCESSING_ID="$target_id"
+        local current_done=$(sqlite3 "$DB_PATH" "SELECT done FROM t_url WHERE id = $target_id;" | xargs)
+        
+        if [ -z "$current_done" ] || [ "$current_done" = "0" ]; then
+            sqlite3 "$DB_PATH" "UPDATE t_url SET done = 2, processed_at = DATETIME('now', 'localtime') WHERE id = $target_id;"
+        else
+            sqlite3 "$DB_PATH" "UPDATE t_url SET done = 2, processed_at = DATETIME('now', 'localtime') WHERE id = $target_id;"
+        fi
+
+        local row=$(sqlite3 "$DB_PATH" "SELECT channel, url, base_dir FROM t_url WHERE id = $target_id;")
+        local channel=$(echo "$row" | cut -d'|' -f1)
+        local url=$(echo "$row" | cut -d'|' -f2)
+        local record_base_dir=$(echo "$row" | cut -d'|' -f3)
+        
+        mkdir -p "${record_base_dir}/${channel}"
+
+        if execute_external_process "$target_id" "$channel" "$url" "$record_base_dir"; then
+            sqlite3 "$DB_PATH" "UPDATE t_url SET done = 1, processed_at = DATETIME('now', 'localtime') WHERE id = $target_id;"
+        else
+            sqlite3 "$DB_PATH" "UPDATE t_url SET done = -1, processed_at = DATETIME('now', 'localtime') WHERE id = $target_id;"
+        fi
+        CURRENT_PROCESSING_ID=""
+    done
+}
+
+# ==========================================
+# 管理（インサート等）用関数
+# ==========================================
+show_recent_urls() {
+    local limit_input="$1" 
+    local where_sql="" 
+    local limit_sql=""
+    
+    if [ -z "$limit_input" ]; then
+        limit_sql="LIMIT 10"
+        echo "=== Recent 10 Registered URLs ==="
+    elif [ "$limit_input" = "0" ]; then
+        limit_sql=""
+        echo "=== All Registered URLs ==="
+    elif [[ "$limit_input" =~ ^[0-9]+$ ]]; then
+        limit_sql="LIMIT $limit_input"
+        echo "=== Recent $limit_input Registered URLs ==="
+    else
+        local id_list_sql=$(parse_and_expand_ids "$limit_input")
+        if [ $? -ne 0 ] || [ -z "$id_list_sql" ]; then 
+            echo "Error: ID parsing failed for list option. Aborted." >&2
+            exit 1
+        fi
+        where_sql="WHERE id IN ($id_list_sql)"
+        limit_sql=""
+        echo "=== Displaying Specified ID(s): $id_list_sql ==="
+    fi
+
+    check_db_exists
+    
+    # 【修正】ヒアドキュメント（<<EOF）を正しく復元し、SQLiteの整形モードを完全に有効化
+    local output_data
+    output_data=$(sqlite3 "$DB_PATH" <<EOF
+.headers on
+.mode column
+SELECT id, channel, 
+    CASE done 
+        WHEN 0 THEN '[-] Waiting' 
+        WHEN 2 THEN '[*] Processing' 
+        WHEN 1 THEN '[o] Done' 
+        WHEN 3 THEN '[!] Interrupted' 
+        ELSE '[x] Failed' 
+    END AS status, 
+    created_at AS Created, 
+    COALESCE(processed_at, '-------- --:--:--') AS Processed, 
+    base_dir, 
+    url 
+FROM t_url 
+$where_sql 
+ORDER BY id DESC 
+$limit_sql;
+EOF
+)
+
+    local terminal_lines=$(tput lines 2>/dev/stdout)
+    if [ -z "$terminal_lines" ]; then
+        terminal_lines=24
+    fi
+    
+    if [ "$(echo "$output_data" | wc -l | xargs)" -gt "$terminal_lines" ]; then
+        echo "$output_data" | less -X -F -S
+    else
+        echo "$output_data"
+    fi
+    exit 0
+}
+
+delete_url_by_ids() {
+    local id_input="$1"
+    local id_list_sql=$(parse_and_expand_ids "$id_input")
+    if [ -z "$id_list_sql" ]; then
+        echo "Error: ID parsing failed. Aborted." >&2
+        exit 1
+    fi
+
+    local clean_ids=$(validate_and_filter_active_ids "$id_list_sql")
+    if [ -z "$clean_ids" ]; then
+        echo "Warning: No valid target IDs found to delete."
+        exit 0
+    fi
+
+    sqlite3 "$DB_PATH" "DELETE FROM t_url WHERE id IN ($clean_ids);"
+    echo "Successfully deleted ID(s): $clean_ids"
+    exit 0
+}
+
+insert_urls() {
+    local channel="$1" 
+    local url_input="$2" 
+    local custom_base_dir="$3" 
+    local base_dir_to_save=""
+    
+    check_db_exists
+    if [ -z "$custom_base_dir" ]; then 
+        base_dir_to_save="$PWD"
+    else 
+        base_dir_to_save=$(echo "$custom_base_dir" | sed "s|^~|${HOME}|")
+    fi
+
+    local url_array=($url_input) 
+    local values_sql=""
+    for url in "${url_array[@]}"; do
+        if [ -n "$url" ]; then
+            if [ -n "$values_sql" ]; then
+                values_sql+=", "
+            fi
+            local safe_ch=$(echo "$channel" | sed "s/'/''/g")
+            local safe_url=$(echo "$url" | sed "s/'/''/g")
+            local safe_base=$(echo "$base_dir_to_save" | sed "s/'/''/g")
+            values_sql+="('$safe_ch', '$safe_url', '$safe_base')"
+        fi
+    done
+
+    if [ -z "$values_sql" ]; then 
+        echo "Error: No valid URLs provided." >&2
+        exit 1
+    fi
+    sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO t_url (channel, url, base_dir) VALUES $values_sql;"
+    echo "Process completed. Unique URL(s) registered under base_dir: ${base_dir_to_save}"
+}
+
+modify_url_records() {
+    local id_input="$1" 
+    local mod_path="$2" 
+    local mod_channel="$3" 
+    local mod_url="$4"
+    
+    if [ -z "$mod_path" ] && [ -z "$mod_channel" ] && [ -z "$mod_url" ]; then 
+        echo "Error: Nothing to modify." >&2
+        exit 1
+    fi
+
+    local id_list_sql=$(parse_and_expand_ids "$id_input")
+    if [ -z "$id_list_sql" ]; then 
+        echo "Error: ID parsing failed. Aborted." >&2
+        exit 1
+    fi
+
+    local clean_ids=$(validate_and_filter_active_ids "$id_list_sql")
+    if [ -z "$clean_ids" ]; then
+        echo "Warning: No valid target IDs found to modify."
+        exit 0
+    fi
+
+    if [ "$(echo "$clean_ids" | grep -c ',')" -gt 0 ] && [ -n "$mod_url" ]; then 
+        echo "Error: Cannot update URL (-u) when multiple IDs are specified. Total process aborted." >&2
+        exit 1
+    fi
+
+    local update_set=""
+    if [ -n "$mod_path" ]; then
+        update_set="base_dir = '$(echo "$mod_path" | sed "s|^~|${HOME}|" | sed "s/'/''/g")'"
+    fi
+    if [ -n "$mod_channel" ]; then 
+        if [ -n "$update_set" ]; then
+            update_set+=", "
+        fi
+        update_set+="channel = '$(echo "$mod_channel" | sed "s/'/''/g")'"
+    fi
+    if [ -n "$mod_url" ]; then 
+        if [ -n "$update_set" ]; then
+            update_set+=", "
+        fi
+        update_set+="url = '$(echo "$mod_url" | sed "s/'/''/g")'"
+    fi
+
+    if [ -n "$update_set" ]; then
+        sqlite3 "$DB_PATH" "UPDATE t_url SET $update_set WHERE id IN ($clean_ids);"
+        echo "Successfully updated record(s) for ID: $clean_ids"
+    fi
+    exit 0
+}
+
+check_url_exists() {
+    local url_input="$1" 
+    local check_array=($url_input)
+    check_db_exists
+    echo "=== URL Duplicate Check ==="
+    for url in "${check_array[@]}"; do
+        [ -z "$url" ] && continue
+        local row=$(sqlite3 "$DB_PATH" "SELECT id, channel, done FROM t_url WHERE url = '$(echo "$url" | sed "s/'/''/g")';")
+        if [ -n "$row" ]; then
+            local dv=$(echo "$row" | cut -d'|' -f3) 
+            local st=""
+            case "$dv" in 
+                0) st="Waiting" ;; 
+                2) st="Processing" ;; 
+                1) st="Done" ;; 
+                3) st="Interrupted" ;; 
+                *) st="Failed" ;; 
+            esac
+            echo "[EXISTS] $url -> ID: $(echo "$row" | cut -d'|' -f1) ($(echo "$row" | cut -d'|' -f2), $st)"
+        else
+            echo "[NEW]    $url"
+        fi
+    done
+    exit 0
+}
+
+handle_immediate_shutdown() {
+    echo -e "\n警告: 強制終了 (Ctrl+C) を検知しました。即時中断します。"
+    if [ -n "$CURRENT_PROCESSING_ID" ]; then
+        echo "ID: $CURRENT_PROCESSING_ID のステータスを [!] Interrupted に変更しています..."
+        sqlite3 "$DB_PATH" "UPDATE t_url SET done = 3, processed_at = DATETIME('now', 'localtime') WHERE id = $CURRENT_PROCESSING_ID;"
+    fi
+    exit 130
+}
+trap handle_immediate_shutdown SIGINT SIGTERM
+
+# ==========================================
+# 先行オプション事前解析 (プリパース)
+# ==========================================
+for arg in "$@"; do
+    if [ "$arg" = "-v" ] || [ "$arg" = "--verbose" ]; then
+        VERBOSE_MODE=1
+    fi
+done
+
+PURE_ARGS=()
+for arg in "$@"; do
+    if [ "$arg" != "-v" ] && [ "$arg" != "--verbose" ]; then
+        PURE_ARGS+=("$arg")
+    fi
+done
+
+# 【バグ修正】配列の最初の要素を明確に指定して文字列比較を行う
+if [ "${PURE_ARGS[0]}" = "-s" ] || [ "${PURE_ARGS[0]}" = "--start" ]; then
+    if [ ${#PURE_ARGS[@]} -gt 2 ]; then
+        echo "Error: Invalid arguments syntax. Too many arguments for start option." >&2
+        exit 1
+    fi
+    init_database
+    # 2番目の引数（インデックス1）が存在する場合は指名IDとして処理
+    if [ -n "${PURE_ARGS[1]}" ]; then
+        TARGET_RUN_IDS=$(parse_and_expand_ids "${PURE_ARGS[1]}")
+        if [ -z "$TARGET_RUN_IDS" ]; then 
+            echo "Error: ID parsing failed or no valid IDs found for start option. Aborted." >&2
+            exit 1
+        fi
+    fi
+    recover_interrupted_tasks
+    run_daemon_loop
+    exit 0
+fi
+
+# ==========================================
+# メイン引数解析（ルーティング）
+# ==========================================
+case "$1" in
+    "-m"|"--modify")
+        if [ -z "$2" ]; then
+            echo "Error: Specify target ID(s) to modify." >&2
+            exit 1
+        fi
+        TARGET_IDS="$2"
+        OPT_PATH=""
+        OPT_CHANNEL=""
+        OPT_URL=""
+        shift 2
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                "-p") OPT_PATH="$2"; shift 2 ;;
+                "-c") OPT_CHANNEL="$2"; shift 2 ;;
+                "-u") OPT_URL="$2"; shift 2 ;;
+                *) echo "Error: Unknown option '$1' for modify mode." >&2; exit 1 ;;
+            esac
+        done
+        modify_url_records "$TARGET_IDS" "$OPT_PATH" "$OPT_CHANNEL" "$OPT_URL" 
+        ;;
+    "-p"|"--path")
+        if [ "$#" -lt 4 ]; then
+            echo "Error: Missing arguments for path option. Usage: $0 -p <base_dir> <channel> \"<urls>\"" >&2
+            exit 1
+        fi
+        insert_urls "$3" "$4" "$2" 
+        ;;
+    "-l"|"--list")     
+        show_recent_urls "$2" 
+        ;;
+    "-d"|"--delete")   
+        if [ -z "$2" ]; then
+            echo "Error: Specify ID(s) to delete." >&2
+            exit 1
+        fi
+        delete_url_by_ids "$2" 
+        ;;
+    "-c"|"--check")    
+        if [ -z "$2" ]; then
+            echo "Error: Specify URL(s) to check." >&2
+            exit 1
+        fi
+        check_url_exists "$2" 
+        ;;
+    *)
+        if [ "$#" -lt 2 ]; then
+            echo "Usage:" >&2
+            echo "  Daemon Start: $0 -s" >&2
+            echo "  Daemon Range: $0 -s <id_start:id_end,id3>" >&2
+            echo "  Debug Mode 1: $0 -s <id_range> -v" >&2
+            echo "  Debug Mode 2: $0 -v -s <id_range>" >&2
+            echo "  Insert (PWD): $0 <channel> \"<url1 url2 ...>\"" >&2
+            echo "  Insert (Path):$0 -p <base_dir> <channel> \"<url1 url2 ...>\"" >&2
+            echo "  Modify row:   $0 -m <id1,id2> [-p path] [-c channel] [-u url]" >&2
+            echo "  Modify range: $0 -m <id_start:id_end,id3> [-p path] [-c channel]" >&2
+            echo "  Show history: $0 -l [lines]" >&2
+            echo "  Delete rows:  $0 -d <id1,id2,...>" >&2
+            echo "  Delete range: $0 -d <id_start:id_end,id3>" >&2
+            echo "  Check URL:    $0 -c \"<url1 url2 ...>\"" >&2
+            exit 1
+        fi
+        insert_urls "$1" "$2" "" 
+        ;;
+esac
+
