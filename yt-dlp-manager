@@ -20,6 +20,8 @@ DB_PATH="${APP_DIR}/queue.db"
 
 # cookie.txtファイルのパスは APP_DIR 固定とする
 COOKIE_FILE="${APP_DIR}/cookie.txt"
+ARCHIVE_FILE="${APP_DIR}/archive.txt"
+PROGRESS_TEMPLATE="    download:[download] Id: %(info.id)s | %(progress._percent_str)s of %(progress._total_bytes_str)s at %(progress._speed_str)s ETA %(progress._eta_str)s"
 
 # デフォルト値（フォールバック用）
 DEFAULT_YTDLP_BIN="/usr/local/bin/yt-dlp"
@@ -200,6 +202,76 @@ validate_and_filter_active_ids() {
     fi
 }
 
+# ============================================================
+# 表示用関数: タスク開始時のステータスボックスを描画する
+# ============================================================
+print_process_box() {
+    local id="$1"
+    local channel="$2"
+    local url="$3"
+    local target_dir="$4"
+
+    # 1. ターミナルの現在の横幅を取得し、右マージン用に1文字分引き算する
+    local cols=$(tput cols 2>/dev/null || echo 80)
+    cols=$(( cols - 1 ))
+    
+    # 【安全策】極端に狭いターミナルでの表示崩れを防群のための最低幅
+    [ "$cols" -lt 45 ] && cols=45
+    
+    # 2. 終端のフェードアウトデザイン用パーツ
+    local fade_out=" ─ ─ · ·"
+    local fade_len=${#fade_out} # 半角8文字分
+
+    # ------------------------------------------------------------
+    # 【ズレ対策】上下の罫線の長さを完全に同期させる
+    # ------------------------------------------------------------
+    # 先にベースとなる共通の線の長さを計算します（下部罫線を基準に決定）
+    local base_line_len=$(( cols - 2 - fade_len ))
+    [ "$base_line_len" -lt 25 ] && base_line_len=25
+    
+    # 下部罫線用の線
+    local bottom_line=$(printf '─%.0s' $(seq 1 $base_line_len))
+
+    # 上部罫線は、ヘッダーの固定文字数とIDの桁数分（${#id}）をベースの長さから差し引いて計算します。
+    # これにより、環境による記号の幅の解釈ズレがあっても、上下の右端の位置が完全に一致します。
+    local top_line_len=$(( base_line_len - 21 - ${#id} ))
+    [ "$top_line_len" -lt 5 ] && top_line_len=5
+    local top_line=$(printf '─%.0s' $(seq 1 $top_line_len))
+    # ------------------------------------------------------------
+
+    # ------------------------------------------------------------
+    # 【動的インテリジェントURLトリム】
+    # ------------------------------------------------------------
+    # 左側のインデント「 │  🔗  」（11文字分）を考慮してURL最大表示幅を決定
+    local max_url_len=$(( cols - 11 - 1 ))
+    
+    if [ ${#url} -gt $max_url_len ]; then
+        local head_len=$(( max_url_len * 45 / 100 ))
+        local tail_len=$(( max_url_len * 45 / 100 ))
+        
+        [ "$head_len" -lt 12 ] && head_len=12
+        [ "$tail_len" -lt 12 ] && tail_len=12
+        
+        if [ $(( head_len + tail_len + 3 )) -gt $max_url_len ]; then
+            tail_len=$(( max_url_len - head_len - 3 ))
+        fi
+
+        local url_head="${url:0:$head_len}"
+        local url_tail="${url: -${tail_len}}"
+        url="${url_head}...${url_tail}"
+    fi
+    # ------------------------------------------------------------
+
+    # 出力
+    # 下部の1本線を絶対基準に相対計算しているため、
+    # ターミナルのフォント環境に依存せず、常に右端の点々が綺麗に縦に並びます。
+    echo " ╭── Processing [ID: ${id}] ${top_line}${fade_out}"
+    echo " │  🎬  ${channel}"
+    echo " │  🔗  ${url}"
+    echo " │  📁  ${target_dir}"
+    echo " ╰${bottom_line}${fade_out}"
+}
+
 # ==========================================
 # デーモン用関数
 # ==========================================
@@ -218,11 +290,12 @@ execute_external_process() {
     local id="$1" channel="$2" url="$3" record_base_dir="$4"
     local target_dir="${record_base_dir}/${channel}"
 
-    echo "Processing ID: $id | Channel: $channel | URL: $url | Path: $target_dir"
+    print_process_box "$id" "$channel" "$url" "$target_dir"
 
     local ARGS=(
         -t sleep
         --cookies "${COOKIE_FILE}"
+        --download-archive "${ARCHIVE_FILE}"
         --remote-components ejs:github
         --js-runtimes "deno:${DENO_BIN}"
         --merge-output-format mp4
@@ -232,6 +305,8 @@ execute_external_process() {
         -P "$target_dir"
         -o "$OUTPUT_TEMPLATE"                 # ★設定値から読み込むように変更
         --add-header "Accept-Language:ja-JP"
+        --exec 'sh -c "printf \"    \033[32;1mFinished\033[0m [ID: '$id']\n    📄 %s\n\n\" \"$(basename {})\""'
+        --progress-template "$PROGRESS_TEMPLATE"
         --progress
         --extractor-args "generic:impersonate"
         --socket-timeout 300
@@ -566,12 +641,14 @@ if [ "${PURE_ARGS[0]}" = "-s" ] || [ "${PURE_ARGS[0]}" = "--start" ]; then
         echo "Error: Invalid arguments syntax. Too many arguments for start option." >&2
         exit 1
     fi
-    # 2番目の引数（インデックス1）が存在する場合は指名IDとして処理
+    # 2. 2番目の引数（インデックス1）が存在する場合は指名IDとして処理
     if [ -n "${PURE_ARGS[1]}" ]; then
         TARGET_RUN_IDS=$(parse_and_expand_ids "${PURE_ARGS[1]}")
         if [ -z "$TARGET_RUN_IDS" ]; then 
-            echo "Error: ID parsing failed or no valid IDs found for start option. Aborted." >&2
-            exit 1
+            cyan="\e[36;1m"
+            reset="\e[0m"
+            echo -e "${cyan}Info:${reset} The specified selection [${PURE_ARGS[1]}] is already complete. Aborted."
+            exit 0
         fi
     fi
     recover_interrupted_tasks
