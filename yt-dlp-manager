@@ -1,4 +1,10 @@
 #!/usr/local/bin/bash
+# ==============================================================================
+# Copyright (c) 2026 Ucchi (@Ucchi98)
+#
+# This software is released under the MIT License.
+# https://opensource.org
+# ==============================================================================
 
 # ==========================================
 # 共通設定 (固定値および外部設定の読み込み)
@@ -12,7 +18,10 @@ CONFIG_FILE="${APP_DIR}/yt-dlp-manager.cfg"
 # データベースファイルのパスは APP_DIR 固定とする
 DB_PATH="${APP_DIR}/queue.db"
 
-# 元のスクリプトの値をベースとしたデフォルト値（フォールバック用）
+# cookie.txtファイルのパスは APP_DIR 固定とする
+COOKIE_FILE="${APP_DIR}/cookie.txt"
+
+# デフォルト値（フォールバック用）
 DEFAULT_YTDLP_BIN="/usr/local/bin/yt-dlp"
 DEFAULT_DENO_BIN="/usr/local/bin/deno"
 DEFAULT_FFMPEG_DIR="/usr/local/bin"
@@ -26,7 +35,7 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 # 設定ファイルが無い場合、またはファイル内で値が設定されていない（空）場合、
-# デフォルト値が代入。
+# デフォルト値を代入。
 : "${YTDLP_BIN:=$DEFAULT_YTDLP_BIN}"
 : "${DENO_BIN:=$DEFAULT_DENO_BIN}"
 : "${FFMPEG_DIR:=$DEFAULT_FFMPEG_DIR}"
@@ -213,7 +222,7 @@ execute_external_process() {
 
     local ARGS=(
         -t sleep
-        --cookies "${HOME}/.config/yt-dlp/cookies.txt"
+        --cookies "${COOKIE_FILE}"
         --remote-components ejs:github
         --js-runtimes "deno:${DENO_BIN}"
         --merge-output-format mp4
@@ -504,6 +513,7 @@ handle_immediate_shutdown() {
 trap handle_immediate_shutdown SIGINT SIGTERM
 
 bootstrap_application
+init_database
 
 # ==========================================
 # 先行オプション事前解析 (プリパース)
@@ -527,7 +537,6 @@ if [ "${PURE_ARGS[0]}" = "-s" ] || [ "${PURE_ARGS[0]}" = "--start" ]; then
         echo "Error: Invalid arguments syntax. Too many arguments for start option." >&2
         exit 1
     fi
-    init_database
     # 2番目の引数（インデックス1）が存在する場合は指名IDとして処理
     if [ -n "${PURE_ARGS[1]}" ]; then
         TARGET_RUN_IDS=$(parse_and_expand_ids "${PURE_ARGS[1]}")
