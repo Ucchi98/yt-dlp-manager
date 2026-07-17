@@ -106,8 +106,8 @@ init_database() {
     if [ ! -f "$DB_PATH" ]; then
         sqlite3 "$DB_PATH" "CREATE TABLE t_url (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, url TEXT NOT NULL UNIQUE, base_dir TEXT NOT NULL, done INTEGER DEFAULT 0, created_at TEXT DEFAULT (DATETIME('now', 'localtime')), processed_at TEXT);"
     fi
-    sqlite3 "$DB_PATH" "PRAGMA busy_timeout = 5000;"
-    sqlite3 "$DB_PATH" "PRAGMA journal_mode = WAL;"
+    sqlite3 "$DB_PATH" "PRAGMA busy_timeout = 5000;" >/dev/null
+    sqlite3 "$DB_PATH" "PRAGMA journal_mode = WAL;" >/dev/null
 }
 
 parse_and_expand_ids() {
@@ -310,15 +310,17 @@ show_recent_urls() {
     local limit_input="$1" 
     local where_sql="" 
     local limit_sql=""
+    local order_sql="ORDER BY id ASC" # 【仕様変更】標準の並び順を昇順（ASC）に統一
     
     if [ -z "$limit_input" ]; then
-        limit_sql="LIMIT 10"
-        echo "=== Recent 10 Registered URLs ==="
-    elif [ "$limit_input" = "0" ]; then
+        # 【仕様変更】引数なしの場合は、全件を昇順（ASC）で表示
         limit_sql=""
-        echo "=== All Registered URLs ==="
+        order_sql="ORDER BY id ASC"
+        echo "=== All Registered URLs (Oldest First) ==="
     elif [[ "$limit_input" =~ ^[0-9]+$ ]]; then
+        # 件数指定の場合のみ、直近のデータを取得するため降順（DESC）のまま維持
         limit_sql="LIMIT $limit_input"
+        order_sql="ORDER BY id DESC"
         echo "=== Recent $limit_input Registered URLs ==="
     else
         local id_list_sql=$(parse_and_expand_ids "$limit_input")
@@ -328,6 +330,8 @@ show_recent_urls() {
         fi
         where_sql="WHERE id IN ($id_list_sql)"
         limit_sql=""
+        # 【仕様変更】指定ID表示時も昇順（ASC）で出力
+        order_sql="ORDER BY id ASC"
         echo "=== Displaying Specified ID(s): $id_list_sql ==="
     fi
 
@@ -352,7 +356,7 @@ SELECT id, channel,
     url 
 FROM t_url 
 $where_sql 
-ORDER BY id DESC 
+$order_sql 
 $limit_sql;
 EOF
 )
@@ -362,8 +366,33 @@ EOF
         terminal_lines=24
     fi
     
-    if [ "$(echo "$output_data" | wc -l | xargs)" -gt "$terminal_lines" ]; then
-        echo "$output_data" | less -X -F -S
+    local terminal_cols=$(tput cols 2>/dev/stdout)
+    if [ -z "$terminal_cols" ]; then
+        terminal_cols=80
+    fi
+    
+    # 出力データの総行数を計算
+    local data_lines=$(echo "$output_data" | wc -l | xargs)
+    
+    # 【修正】色コードを含まない純粋なテキストの段階で、ターミナル横幅を超えているかを判定
+    local has_long_line=$(echo "$output_data" | awk -v max="$terminal_cols" 'length($0) > max {found=1; exit} END {print found?1:0}')
+    
+    # 端末が着色に対応している場合のみ、SQLiteから出力されたプレーンテキストに対してsedで色付けを施す
+    if [ -t 1 ] && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+        # BSD sed (macOS/FreeBSD) と GNU sed (Linux) の両方で動作するように物理的なESC文字を変数化
+        local esc=$(printf '\033')
+        output_data=$(echo "$output_data" | sed \
+            -e "s/\[-\] Waiting/${esc}[0m&${esc}[0m/g" \
+            -e "s/\[\*\] Processing/${esc}[33m&${esc}[0m/g" \
+            -e "s/\[o\] Done/${esc}[32m&${esc}[0m/g" \
+            -e "s/\[\!\] Interrupted/${esc}[36m&${esc}[0m/g" \
+            -e "s/\[x\] Failed/${esc}[31m&${esc}[0m/g")
+    fi
+
+    # 縦の行数が溢れた場合、あるいは横幅を超える行が1行でもある場合に less -S を起動
+    # 色コードを維持したままスクロールさせるため、lessに「-R」オプションを追加
+    if [ "$data_lines" -gt "$terminal_lines" ] || [ "$has_long_line" -eq 1 ]; then
+        echo "$output_data" | less -X -F -S -R
     else
         echo "$output_data"
     fi
