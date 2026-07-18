@@ -627,18 +627,18 @@ modify_url_records() {
 
     local id_list_sql=$(parse_and_expand_ids "$id_input")
     if [ -z "$id_list_sql" ]; then 
-        log_error "ID parsing failed. Aborted."
+        log_error "Specified tasks are invalid. Aborted."
         exit 1
     fi
 
     local clean_ids=$(validate_and_filter_active_ids "$id_list_sql")
     if [ -z "$clean_ids" ]; then
         log_error "Specified tasks are invalid or currently processing. Aborted."
-        exit 0
+        exit 1
     fi
 
     if [ "$(echo "$clean_ids" | grep -c ',')" -gt 0 ] && [ -n "$mod_url" ]; then 
-        log_error "Cannot update URL (-u) when multiple IDs are specified. Aborted."
+        log_error "Cannot update URL when multiple IDs are specified. Aborted."
         exit 1
     fi
 
