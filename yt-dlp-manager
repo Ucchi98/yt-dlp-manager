@@ -204,8 +204,9 @@ init_database() {
 parse_and_expand_ids() {
     local id_input="$1"
     local expanded_ids=()
+    local max_id=$(sqlite3 "$DB_PATH" "SELECT MAX(id) FROM t_url;")
+    [ -z "$max_id" ] && max_id=0
 
-    # 1. コンマとコロンの範囲指定をすべて展開
     IFS=',' read -r -a id_parts <<< "$id_input"
     for part in "${id_parts[@]}"; do
         part=$(echo "$part" | xargs)
@@ -215,79 +216,79 @@ parse_and_expand_ids() {
             local start_id=$(echo "$part" | cut -d':' -f1)
             local end_id=$(echo "$part" | cut -d':' -f2)
             
-            if [ -z "$start_id" ]; then
-                start_id=$(sqlite3 "$DB_PATH" "SELECT MIN(id) FROM t_url;")
+            # 開始/終了のデフォルト値を設定
+            [ -z "$start_id" ] && start_id=1
+            [ -z "$end_id" ] && end_id=$max_id
+            
+            # 【追加ロジック】開始IDが最大値を超えている場合は、そのパーツは無効
+            if [ "$start_id" -gt "$max_id" ]; then
+                continue
             fi
-            if [ -z "$end_id" ]; then
-                end_id=$(sqlite3 "$DB_PATH" "SELECT MAX(id) FROM t_url;")
-            fi
-            if [ -z "$start_id" ] || [ -z "$end_id" ]; then
+            # 終了IDを最大値までに制限
+            [ "$end_id" -gt "$max_id" ] && end_id=$max_id
+            
+            # 【追加ロジック】逆順指定の防止
+            if [ "$start_id" -gt "$end_id" ]; then
                 continue
             fi
             
-            if [ "$start_id" -gt "$end_id" ]; then
-                local tmp=$start_id
-                start_id=$end_id
-                end_id=$tmp
-            fi
             for ((id=start_id; id<=end_id; id++)); do
                 expanded_ids+=("$id")
             done
         elif [[ "$part" =~ ^[0-9]+$ ]]; then
-            expanded_ids+=("$part")
+            # 【追加ロジック】単一ID指定でも最大値を超えていたら含めない
+            if [ "$part" -le "$max_id" ]; then
+                expanded_ids+=("$part")
+            fi
         else
             log_error "Invalid ID format '$part'."
             return 1
         fi
     done
 
-    # 展開されたIDが1つもない場合は終了
-    [ ${#expanded_ids[@]} -eq 0 ] && return 0
-
-    # 2. 【最適化】重複を排除しつつ、1回のSQL接続で実在するものだけを高速フィルタリング
-    local sql_in_list=$(printf ", %s" "${expanded_ids[@]}")
-    sql_in_list=${sql_in_list:2}
-   
-    # -s モードの時だけ、done が 1（完了）と 2（処理中）のタスクを除外する条件句を作る
-    local s_mode_filter=""
-    if [ "${PURE_ARGS[0]}" = "-s" ] || [ "${PURE_ARGS[0]}" = "--start" ]; then
-        s_mode_filter="AND done NOT IN (1, 2)"
-    fi
-
-    local valid_ids
-    valid_ids=$(sqlite3 "$DB_PATH" "SELECT id FROM t_url WHERE id IN ($sql_in_list) ${s_mode_filter} ORDER BY id ASC;" | xargs)
-
-    if [ -n "$valid_ids" ]; then
-        # スペース区切りをカンマ区切りに置換して出力（例: "1 2 5" -> "1, 2, 5"）
-        echo "${valid_ids// /, }"
+    # 展開結果から重複を除去して返す
+    if [ ${#expanded_ids[@]} -gt 0 ]; then
+        # スペース区切りをカンマ区切りに置換
+        local unique_ids=$(echo "${expanded_ids[@]}" | tr ' ' '\n' | sort -un | paste -sd, -)
+        echo "$unique_ids"
     fi
 }
 
-# 削除と修正における、生存・処理中(done=2)のロック確認を一括代行
-validate_and_filter_active_ids() {
+# 汎用バリデーション関数
+# @param id_list_sql: カンマ区切りのID文字列
+# @param allowed_statuses: 許可するステータス値のリスト（例: "0,1,2,3,-1"）
+validate_ids() {
     local id_list_sql="$1"
+    local allowed_statuses="$2"
     local filtered_ids=()
-    IFS=',' read -r -a id_parts <<< "${id_list_sql//,/\ }"
+    
+    # IDリストを配列に展開
+    IFS=',' read -r -a id_parts <<< "$id_list_sql"
     
     for id in "${id_parts[@]}"; do
         id=$(echo "$id" | xargs)
-        local row=$(sqlite3 "$DB_PATH" "SELECT done FROM t_url WHERE id = $id;" | xargs)
+        [ -z "$id" ] && continue
         
-        if [ -z "$row" ]; then
-            continue
-        elif [ "$row" = "2" ]; then
-            log_info "ID $id is currently [Processing]. Skipped."
+        # IDに紐づくステータス(done)を取得
+        local status=$(sqlite3 "$DB_PATH" "SELECT done FROM t_url WHERE id = $id;" | xargs)
+        
+        # 1. 存在しないIDはスキップ
+        if [ -z "$status" ]; then
             continue
         fi
-        filtered_ids+=("$id")
+        
+        # 2. 許可されたステータスに含まれているか判定
+        if [[ ",$allowed_statuses," =~ ",$status," ]]; then
+            filtered_ids+=("$id")
+        else
+            # 必要に応じて「ID x は許可されていないステータスです」というログを出す
+            log_debug "ID $id (Status: $status) skipped due to status restriction."
+        fi
     done
     
-    if [ ${#filtered_ids[@]} -eq 0 ]; then
-        echo "" 
-    else
-        local result=$(printf ", %s" "${filtered_ids[@]}")
-        echo "${result:2}"
-    fi
+    # 結果をカンマ区切りで返す
+    local result=$(IFS=','; echo "${filtered_ids[*]}")
+    echo "$result"
 }
 
 # ============================================================
@@ -487,15 +488,20 @@ show_recent_urls() {
         log_debug "Recent $limit_input Registered URLs"
     else
         local id_list_sql=$(parse_and_expand_ids "$limit_input")
-        if [ $? -ne 0 ] || [ -z "$id_list_sql" ]; then 
-            log_error "ID parsing failed for list option. Aborted."
+        
+        # 汎用バリデーション: すべてのステータスを許可して存在チェック
+        local validated_ids=$(validate_ids "$id_list_sql" "0,1,2,3,-1")
+        
+        if [ -z "$validated_ids" ]; then 
+            log_error "Specified tasks are invalid."
             exit 1
         fi
-        where_sql="WHERE id IN ($id_list_sql)"
+        
+        where_sql="WHERE id IN ($validated_ids)"
         limit_sql=""
         # 【仕様変更】指定ID表示時も昇順（ASC）で出力
         order_sql="ORDER BY id ASC"
-        log_debug "Displaying Specified ID: $id_list_sql"
+        log_debug "Displaying Specified ID: $validated_ids"
     fi
 
     # 【修正】ヒアドキュメント（<<EOF）を正しく復元し、SQLiteの整形モードを完全に有効化
@@ -568,7 +574,8 @@ delete_url_by_ids() {
         exit 1
     fi
 
-    local clean_ids=$(validate_and_filter_active_ids "$id_list_sql")
+    # 処理中(2)を除いたIDのみを許可
+    local clean_ids=$(validate_ids "$id_list_sql" "0,1,3,-1")
     if [ -z "$clean_ids" ]; then
         log_error "Specified tasks are invalid or currently processing. Aborted."
         exit 1
@@ -631,7 +638,8 @@ modify_url_records() {
         exit 1
     fi
 
-    local clean_ids=$(validate_and_filter_active_ids "$id_list_sql")
+    # 処理中(2)を除いたIDのみを許可
+    local clean_ids=$(validate_ids "$id_list_sql" "0,1,3,-1")
     if [ -z "$clean_ids" ]; then
         log_error "Specified tasks are invalid or currently processing. Aborted."
         exit 1
