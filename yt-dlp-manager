@@ -44,12 +44,58 @@ fi
 : "${OUTPUT_TEMPLATE:=$DEFAULT_OUTPUT_TEMPLATE}"
 
 CURRENT_PROCESSING_ID=""
-TARGET_RUN_IDS="" # デーモンに処理させるIDのSQL用リスト
+TARGET_RUN_IDS="" # 処理させるIDのSQL用リスト
 VERBOSE_MODE=0    # デバッグログフラグの初期化
 
 # ==========================================
 # 共通関数・ID展開ロジック
 # ==========================================
+show_help() {
+    cat << EOF
+Usage:
+  yt-dlp-manager [OPTIONS]
+  yt-dlp-manager channel <"url ...">
+  yt-dlp-manager -p base_dir channel <"url ...">
+  yt-dlp-manager -s [id_range] [-v]
+  yt-dlp-manager -m id_range [-p base_dir] [-c channel] [-u url]
+  yt-dlp-manager -l [id_range]
+  yt-dlp-manager -d id_range
+  yt-dlp-manager -c <"url ...">
+
+Options:
+  -s, --start [id_range]
+               Executes tasks. If id_range is omitted, it enters persistent
+               mode to sequentially process pending tasks in the queue.
+               If id_range is specified, terminates immediately after
+               processing the specified tasks.
+  -p, --path base_dir channel url ...
+               Registers a task into the queue by specifying the base_dir.
+  -m, --modify id_range [-p base_dir] [-c channel] [-u url]
+               Modifies task information (Base Dir, Channel, URL) for the
+               specified id_range.
+  -l, --list [id_range]
+               Displays a list of registered tasks. Lists all tasks in
+               ascending order if id_range is omitted.
+  -d, --delete id_range
+               Deletes the tasks within the specified id_range from the queue.
+  -c, --check url ...
+               Checks whether a task matching the specified url has already
+               been registered. Multiple urls can be specified by enclosing
+               them entirely within a single pair of quotation marks.
+  -v, --verbose
+               Enables verbose mode, outputting detailed logs from internal
+               yt-dlp executions during task processing.
+  -h, --help
+               Displays this help message.
+
+ID Range Format:
+  Single ID:   1
+  List:        1,3,5
+  Range:       1:10 (1 to 10), :5 (First to 5), 10: (10 to End)
+  Combination: 1:3,5,:7,10:
+EOF
+}
+
 bootstrap_application() {
     # 1. アプリケーションの管理ディレクトリが存在することを確認・作成
     if [ ! -d "$APP_DIR" ]; then
@@ -95,14 +141,6 @@ EOF
     fi
 }
 
-check_db_exists() {
-    if [ ! -f "$DB_PATH" ]; then
-        echo "Error: Database file not found at $DB_PATH" >&2
-        echo "Please run this script as daemon mode (-s) first to initialize." >&2
-        exit 1
-    fi
-}
-
 init_database() {
     # bootstrap_application が先に実行されているため、APP_DIR は必ず存在します
     if [ ! -f "$DB_PATH" ]; then
@@ -115,7 +153,6 @@ init_database() {
 parse_and_expand_ids() {
     local id_input="$1"
     local expanded_ids=()
-    check_db_exists
 
     # 1. コンマとコロンの範囲指定をすべて展開
     IFS=',' read -r -a id_parts <<< "$id_input"
@@ -273,7 +310,7 @@ print_process_box() {
 }
 
 # ==========================================
-# デーモン用関数
+# 常駐モード用関数
 # ==========================================
 recover_interrupted_tasks() {
     echo "Checking for interrupted tasks from previous run..."
@@ -328,12 +365,12 @@ execute_external_process() {
 }
 
 run_daemon_loop() {
-    echo "Daemon started. Listening to database..."
+    echo "Persistent mode started. Listening to database..."
     if [ "$VERBOSE_MODE" -eq 1 ]; then
-        echo "【デバッグモード有効】yt-dlpの全出力ログを表示します。"
+        echo "Verbose mode enabled. Displaying all yt-dlp logs."
     fi
     if [ -n "$TARGET_RUN_IDS" ]; then
-        echo "実際に存在する以下のIDのみを限定処理します: $TARGET_RUN_IDS"
+        echo "Processing specified ID(s) only: $TARGET_RUN_IDS"
     fi
 
     while true; do
@@ -346,7 +383,7 @@ run_daemon_loop() {
         local target_id=$(sqlite3 "$DB_PATH" "$sql_query")
         if [ -z "$target_id" ]; then
             if [ -n "$TARGET_RUN_IDS" ]; then
-                echo "指定されたすべてのタスクの処理が完了、または対象がありません。デーモンを終了します。"
+                echo "All specified tasks completed. Exiting..."
                 exit 0
             fi
             sleep "$INTERVAL"
@@ -410,8 +447,6 @@ show_recent_urls() {
         echo "=== Displaying Specified ID(s): $id_list_sql ==="
     fi
 
-    check_db_exists
-    
     # 【修正】ヒアドキュメント（<<EOF）を正しく復元し、SQLiteの整形モードを完全に有効化
     local output_data
     output_data=$(sqlite3 "$DB_PATH" <<EOF
@@ -484,7 +519,7 @@ delete_url_by_ids() {
 
     local clean_ids=$(validate_and_filter_active_ids "$id_list_sql")
     if [ -z "$clean_ids" ]; then
-        echo "Warning: No valid target IDs found to delete."
+        echo "Warning: Specified ID(s) are invalid or currently processing. Operation aborted."
         exit 0
     fi
 
@@ -499,7 +534,6 @@ insert_urls() {
     local custom_base_dir="$3" 
     local base_dir_to_save=""
     
-    check_db_exists
     if [ -z "$custom_base_dir" ]; then 
         base_dir_to_save="$PWD"
     else 
@@ -524,8 +558,9 @@ insert_urls() {
         echo "Error: No valid URLs provided." >&2
         exit 1
     fi
-    sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO t_url (channel, url, base_dir) VALUES $values_sql;"
-    echo "Process completed. Unique URL(s) registered under base_dir: ${base_dir_to_save}"
+
+    local inserted_count=$(sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO t_url (channel, url, base_dir) VALUES $values_sql; SELECT changes();")
+    echo "Successfully registered $inserted_count task(s)."
 }
 
 modify_url_records() {
@@ -547,12 +582,12 @@ modify_url_records() {
 
     local clean_ids=$(validate_and_filter_active_ids "$id_list_sql")
     if [ -z "$clean_ids" ]; then
-        echo "Warning: No valid target IDs found to modify."
+        echo "Warning: Specified ID(s) are invalid or currently processing. Operation aborted."
         exit 0
     fi
 
     if [ "$(echo "$clean_ids" | grep -c ',')" -gt 0 ] && [ -n "$mod_url" ]; then 
-        echo "Error: Cannot update URL (-u) when multiple IDs are specified. Total process aborted." >&2
+        echo "Error: Cannot update URL (-u) when multiple IDs are specified. Operation aborted." >&2
         exit 1
     fi
 
@@ -575,7 +610,7 @@ modify_url_records() {
 
     if [ -n "$update_set" ]; then
         sqlite3 "$DB_PATH" "UPDATE t_url SET $update_set WHERE id IN ($clean_ids);"
-        echo "Successfully updated record(s) for ID: $clean_ids"
+        echo "Successfully updated record(s) for ID(s): $clean_ids"
     fi
     exit 0
 }
@@ -583,7 +618,7 @@ modify_url_records() {
 check_url_exists() {
     local url_input="$1" 
     local check_array=($url_input)
-    check_db_exists
+
     echo "=== URL Duplicate Check ==="
     for url in "${check_array[@]}"; do
         [ -z "$url" ] && continue
@@ -607,9 +642,8 @@ check_url_exists() {
 }
 
 handle_immediate_shutdown() {
-    echo -e "\n警告: 強制終了 (Ctrl+C) を検知しました。即時中断します。"
+    echo -e "\nWarning: Interrupt signal (Ctrl+C) detected. Aborting process..."
     if [ -n "$CURRENT_PROCESSING_ID" ]; then
-        echo "ID: $CURRENT_PROCESSING_ID のステータスを [!] Interrupted に変更しています..."
         sqlite3 "$DB_PATH" "UPDATE t_url SET done = 3, processed_at = DATETIME('now', 'localtime') WHERE id = $CURRENT_PROCESSING_ID;"
     fi
     exit 130
@@ -638,8 +672,8 @@ done
 # 【バグ修正】配列の最初の要素を明確に指定して文字列比較を行う
 if [ "${PURE_ARGS[0]}" = "-s" ] || [ "${PURE_ARGS[0]}" = "--start" ]; then
     if [ ${#PURE_ARGS[@]} -gt 2 ]; then
-        echo "Error: Invalid arguments syntax. Too many arguments for start option." >&2
-        exit 1
+        echo "Error: Too many arguments for start option." >&2
+        exit 
     fi
     # 2. 2番目の引数（インデックス1）が存在する場合は指名IDとして処理
     if [ -n "${PURE_ARGS[1]}" ]; then
@@ -657,68 +691,66 @@ if [ "${PURE_ARGS[0]}" = "-s" ] || [ "${PURE_ARGS[0]}" = "--start" ]; then
 fi
 
 # ==========================================
-# メイン引数解析（ルーティング）
+# メイン処理 (メインオプション解析)
 # ==========================================
 case "$1" in
     "-m"|"--modify")
         if [ -z "$2" ]; then
-            echo "Error: Specify target ID(s) to modify." >&2
+            echo "Error: Missing arguments." >&2
             exit 1
         fi
-        TARGET_IDS="$2"
-        OPT_PATH=""
-        OPT_CHANNEL=""
-        OPT_URL=""
+        
+        target_ids="$2"
         shift 2
+        
+        mod_path=""
+        mod_channel=""
+        mod_url=""
+        
         while [ "$#" -gt 0 ]; do
             case "$1" in
-                "-p") OPT_PATH="$2"; shift 2 ;;
-                "-c") OPT_CHANNEL="$2"; shift 2 ;;
-                "-u") OPT_URL="$2"; shift 2 ;;
-                *) echo "Error: Unknown option '$1' for modify mode." >&2; exit 1 ;;
+                "-p") mod_path="$2"; shift 2 ;;
+                "-c") mod_channel="$2"; shift 2 ;;
+                "-u") mod_url="$2"; shift 2 ;;
+                *)
+                    echo "Error: Unknown option '$1'." >&2
+                    exit 1
+                    ;;
             esac
         done
-        modify_url_records "$TARGET_IDS" "$OPT_PATH" "$OPT_CHANNEL" "$OPT_URL" 
+        modify_url_records "$target_ids" "$mod_path" "$mod_channel" "$mod_url"
         ;;
     "-p"|"--path")
         if [ "$#" -lt 4 ]; then
-            echo "Error: Missing arguments for path option. Usage: $0 -p <base_dir> <channel> \"<urls>\"" >&2
+            echo "Error: Missing arguments." >&2
             exit 1
         fi
-        insert_urls "$3" "$4" "$2" 
+        insert_urls "$3" "$4" "$2"
         ;;
-    "-l"|"--list")     
-        show_recent_urls "$2" 
+    "-l"|"--list")
+        show_recent_urls "$2"
         ;;
-    "-d"|"--delete")   
+    "-d"|"--delete")
         if [ -z "$2" ]; then
-            echo "Error: Specify ID(s) to delete." >&2
+            echo "Error: Missing arguments." >&2
             exit 1
         fi
-        delete_url_by_ids "$2" 
+        delete_url_by_ids "$2"
         ;;
-    "-c"|"--check")    
+    "-c"|"--check")
         if [ -z "$2" ]; then
-            echo "Error: Specify URL(s) to check." >&2
+            echo "Error: Missing arguments." >&2
             exit 1
         fi
-        check_url_exists "$2" 
+        check_url_exists "$2"
+        ;;
+    "-h"|"--help")
+        show_help
+        exit 0
         ;;
     *)
         if [ "$#" -lt 2 ]; then
-            echo "Usage:" >&2
-            echo "  Daemon Start: $0 -s" >&2
-            echo "  Daemon Range: $0 -s <id_start:id_end,id3>" >&2
-            echo "  Debug Mode 1: $0 -s <id_range> -v" >&2
-            echo "  Debug Mode 2: $0 -v -s <id_range>" >&2
-            echo "  Insert (PWD): $0 <channel> \"<url1 url2 ...>\"" >&2
-            echo "  Insert (Path):$0 -p <base_dir> <channel> \"<url1 url2 ...>\"" >&2
-            echo "  Modify row:   $0 -m <id1,id2> [-p path] [-c channel] [-u url]" >&2
-            echo "  Modify range: $0 -m <id_start:id_end,id3> [-p path] [-c channel]" >&2
-            echo "  Show history: $0 -l [lines]" >&2
-            echo "  Delete rows:  $0 -d <id1,id2,...>" >&2
-            echo "  Delete range: $0 -d <id_start:id_end,id3>" >&2
-            echo "  Check URL:    $0 -c \"<url1 url2 ...>\"" >&2
+            show_help >&2
             exit 1
         fi
         insert_urls "$1" "$2" "" 
