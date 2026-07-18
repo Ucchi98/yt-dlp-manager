@@ -101,7 +101,7 @@ log_debug() {
 }
 
 # Usage表示関数
-show_help() {
+print_help() {
     cat << EOF
 Usage:
   yt-dlp-manager [OPTIONS]
@@ -364,7 +364,7 @@ print_process_box() {
 # ==========================================
 # 常駐モード用関数
 # ==========================================
-recover_interrupted_tasks() {
+reset_interrupted_state() {
     log_debug "Checking for interrupted tasks from previous run..."
     local sql_cmd="UPDATE t_url SET done = -1, processed_at = DATETIME('now', 'localtime') WHERE done = 2"
     if [ -n "$TARGET_RUN_IDS" ]; then
@@ -416,7 +416,7 @@ execute_external_process() {
     return $status
 }
 
-run_daemon_loop() {
+process_queued_tasks() {
     log_debug "Persistent mode started. Listening to database..."
     if [ "$VERBOSE_MODE" -eq 1 ]; then
         log_debug "Verbose mode enabled. Displaying all yt-dlp logs."
@@ -470,7 +470,7 @@ run_daemon_loop() {
 # ==========================================
 # 管理（インサート等）用関数
 # ==========================================
-show_recent_urls() {
+list_task() {
     local limit_input="$1" 
     local where_sql="" 
     local limit_sql=""
@@ -566,7 +566,7 @@ EOF
     exit 0
 }
 
-delete_url_by_ids() {
+delete_task_by_ids() {
     local id_input="$1"
     local id_list_sql=$(parse_and_expand_ids "$id_input")
     if [ -z "$id_list_sql" ]; then
@@ -586,7 +586,7 @@ delete_url_by_ids() {
     exit 0
 }
 
-insert_urls() {
+insert_task() {
     local channel="$1" 
     local url_input="$2" 
     local custom_base_dir="$3" 
@@ -621,7 +621,7 @@ insert_urls() {
     log_success "Successfully registered $inserted_count task(s)."
 }
 
-modify_url_records() {
+modify_task_by_ids() {
     local id_input="$1" 
     local mod_path="$2" 
     local mod_channel="$3" 
@@ -674,7 +674,7 @@ modify_url_records() {
     exit 0
 }
 
-check_url_exists() {
+find_task_by_urls() {
     local url_input="$1" 
     local check_array=($url_input)
 
@@ -756,8 +756,8 @@ start_download_tasks() {
             ;;
     esac
 
-    recover_interrupted_tasks
-    run_daemon_loop
+    reset_interrupted_state
+    process_queued_tasks
     exit 0
 }
 
@@ -800,42 +800,42 @@ case "$1" in
                     ;;
             esac
         done
-        modify_url_records "$target_ids" "$mod_path" "$mod_channel" "$mod_url"
+        modify_task_by_ids "$target_ids" "$mod_path" "$mod_channel" "$mod_url"
         ;;
     "-p"|"--path")
         if [ "$#" -lt 4 ]; then
             log_error "Missing arguments."
             exit 1
         fi
-        insert_urls "$3" "$4" "$2"
+        insert_task "$3" "$4" "$2"
         ;;
     "-l"|"--list")
-        show_recent_urls "$2"
+        list_task "$2"
         ;;
     "-d"|"--delete")
         if [ -z "$2" ]; then
             log_error "Missing arguments."
             exit 1
         fi
-        delete_url_by_ids "$2"
+        delete_task_by_ids "$2"
         ;;
     "-c"|"--check")
         if [ -z "$2" ]; then
             log_error "Missing arguments."
             exit 1
         fi
-        check_url_exists "$2"
+        find_task_by_urls "$2"
         ;;
     "-h"|"--help")
-        show_help
+        print_help
         exit 0
         ;;
     *)
         if [ "$#" -lt 2 ]; then
-            show_help >&2
+            print_help >&2
             exit 1
         fi
-        insert_urls "$1" "$2" "" 
+        insert_task "$1" "$2" "" 
         ;;
 esac
 
