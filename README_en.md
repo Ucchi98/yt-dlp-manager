@@ -1,12 +1,8 @@
-# yt-dlp-manager
-
-A database-driven CLI tool to manage and automate video download queues using yt-dlp.
-
 ```text
 yt-dlp-manager(1)               User Commands Manual               yt-dlp-manager(1)
 
 NAME
-       yt-dlp-manager - Video download queue manager and automation tool using yt-dlp
+       yt-dlp-manager - Task management and execution automation tool using yt-dlp
 
 SYNOPSIS
        yt-dlp-manager [OPTIONS]
@@ -21,40 +17,37 @@ SYNOPSIS
 DESCRIPTION
        yt-dlp-manager is a database-driven CLI utility designed to manage execution
        queues for the video download tool yt-dlp(1). It manages download tasks
-       via SQLite and can run in the background as a daemon process.
+       via SQLite and can run in persistent mode.
 
        The standard way to register a task is to navigate to your desired destination
        directory (base_dir) and execute the command by specifying channel and url
-       without any options. In this case, the current working directory from which
-       the command is run is automatically treated as the base_dir. This design
-       eliminates the need to repeatedly type out long absolute paths.
+       without any options. In this case, the directory from which the command is run
+       is automatically registered as the base_dir.
 
-       Multiple space-separated URLs can be specified for the url argument. If a URL
-       contains shell special characters such as '?' or '&', the argument must be
-       enclosed in quotes or escaped to prevent misinterpretation by the shell.
+       The url argument must be enclosed entirely within a single pair of quotation
+       marks. Multiple URLs can be specified by separating them with a space.
 
        Each registered task consists of the following elements:
        ID         Unique identification number for the task (automatically assigned sequentially from 1)
-       Channel    Channel name (used as the sub-directory name inside the Base Dir)
+       Channel    Channel name (used as the destination sub-directory name)
        URL        The source URL of the video
        Base Dir   The absolute path to the parent directory of the download destination
 
 OPTIONS
        -s, --start [id_range]
               Executes tasks.
-              If id_range is omitted, it enters daemon mode to sequentially process
-              all pending tasks in the queue.
+              If id_range is omitted, it enters persistent mode to sequentially
+              process pending tasks in the queue.
               If id_range is specified, the script terminates immediately after
               processing the specified tasks.
 
        -p, --path base_dir channel url ...
-              Registers a task into the queue by explicitly specifying the base_dir.
-              Useful when you want to queue tasks from outside the destination directory.
+              Registers a task into the queue by specifying the base_dir.
 
        -m, --modify id_range [-p base_dir] [-c channel] [-u url]
               Modifies task information for the specified id_range.
               Specifying base_dir, channel, or url overwrites the corresponding
-              fields of the target tasks with the new values.
+              Base Dir, Channel, or URL fields of the target tasks with the new values.
 
        -l, --list [id_range]
               Displays a list of registered tasks.
@@ -66,8 +59,9 @@ OPTIONS
               Deletes the tasks within the specified id_range from the queue.
 
        -c, --check url ...
-              Checks whether a task matching the exact specified url has already
-              been registered in the queue.
+              Checks whether a task matching the specified url has already been
+              registered. Multiple urls can be specified by enclosing them entirely
+              within a single pair of quotation marks.
 
        -v, --verbose
               Enables verbose mode, outputting detailed logs from internal yt-dlp
@@ -102,11 +96,11 @@ EXAMPLES
        Task Registration:
          $ yt-dlp-manager "TechChannel" "https://url1 https://url2"
            Registers two URLs into the queue with Channel set to "TechChannel".
-           The Base Dir becomes the current working directory.
+           The Base Dir becomes the directory from which the command was run.
 
          $ yt-dlp-manager -p ~/Downloads/Videos "MusicChannel" "https://url3"
-           Registers one URL into the queue with Base Dir explicitly set to
-           "~/Downloads/Videos" and Channel set to "MusicChannel".
+           Registers one URL into the queue with Channel set to "MusicChannel".
+           The Base Dir becomes "~/Downloads/Videos".
 
        Task Listing:
          $ yt-dlp-manager -l
@@ -141,7 +135,7 @@ EXAMPLES
          Note: This command only targets tasks whose Status is "Waiting", "Interrupted", or "Failed".
 
          $ yt-dlp-manager -s
-           Launches in daemon mode to process tasks in the queue sequentially.
+           Launches in persistent mode to process tasks in the queue sequentially.
 
          $ yt-dlp-manager -s 1:5
            Executes only the tasks within the ID range of 1 to 5.
@@ -171,8 +165,9 @@ EXAMPLES
            Deletes tasks within the specified ID range all at once.
 
        Duplicate Checking:
-         $ yt-dlp-manager -c "https://url1"
-           Checks if a task with the URL "https://url1" is already registered in the database.
+         $ yt-dlp-manager -c "https://url1 https://url2"
+           Checks if tasks with the URLs "https://url1" and "https://url2" are
+           already registered in the database.
 
 FILES
        ~/.config/yt-dlp-manager/yt-dlp-manager.cfg

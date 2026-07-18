@@ -2,7 +2,8 @@
 yt-dlp-manager(1)             ユーザーコマンドマニュアル             yt-dlp-manager(1)
 
 名称
-       yt-dlp-manager - yt-dlpを用いた動画管理・ダウンロード自動化ツール
+-       yt-dlp-manager - yt-dlpを用いた動画管理・ダウンロード自動化ツール
++       yt-dlp-manager - yt-dlpを用いたタスク管理・実行自動化ツール
 
 書式 (SYNOPSIS)
        yt-dlp-manager [OPTIONS]
@@ -17,19 +18,29 @@ yt-dlp-manager(1)             ユーザーコマンドマニュアル           
 解説 (DESCRIPTION)
        yt-dlp-managerは、動画ダウンロードツールyt-dlp(1)の実行キューを管理
        するためのデータベース駆動型CLIツールである。SQLiteを使用してダウン
-       ロードタスクを管理し、バックグラウンドでデーモンとして動作させるこ
-       とが可能である。
+-       ロードタスクを管理し、バックグラウンドでデーモンとして動作させるこ
+-       とが可能である。
++       ロードタスクを管理し、常駐モードとして動作させることが可能である。
 
-       標準的なタスクの登録方法は、保存先としたいディレクトリ（base_dir）
-       に移動し、オプションを付けずに channel と url を指定して実行する
-       方法である。このとき、コマンドを実行したカレントディレクトリが自動
-       的に base_dir として処理される。保存先ディレクトリを指定する手間を
-       省略するための仕様である。
+-       標準的なタスク的登録方法は、保存先としたいディレクトリ（base_dir）
+-       に移動し、オプションを付けずに channel と url を指定して実行する
+-       方法である。このとき、コマンドを実行したカレントディレクトリが自動
+-       的に base_dir として処理される。保存先ディレクトリを指定する手間を
+-       省略するための仕様である。
++       標準的なタスクの登録方法は、保存先としたいディレクトリ（base_dir）
++       に移動し、オプションを付けずに channel と url を指定して実行する
++       方法である。このとき、コマンドを実行したディレクトリが自動的に
++       base_dir として登録される。
 
-       引数 url には、スペース区切りで複数のURLを指定できる。URLに '?' や
-       '&' などのシェル特殊文字が含まれる場合は、シェルによる誤解釈を防ぐ
-       ため、必ず引数をクォーテーションで囲むか、エスケープする必要がある。
+-       引数 url にには、スペース区切りで複数のURLを指定できる。URLに '?' や
+-       '&' などのシェル特殊文字が含まれる場合は、シェルによる誤解釈を防ぐ
+-       ため、必ず引数をクォーテーションで囲むか、エスケープする必要がある。
++       引数 url は、引数全体を1つのクォーテーションで囲んで記述する。
++       複数の URL を指定する場合は、スペースで区切る。
 
+-       登録された各タスクには、管理用の識別番号として「ID」（1からの連番）
+-       が自動的に割り振られる。
+-
        登録された各タスクは、以下の要素で構成される。
        ID         タスクの識別番号（1からの連番が自動的に割り振られる）
        Channel    チャンネル名（保存先ディレクトリ名として使用される）
@@ -39,20 +50,25 @@ yt-dlp-manager(1)             ユーザーコマンドマニュアル           
 オプション (OPTIONS)
        -s, --start [id_range]
               タスクを実行する。
-              id_range を省略した場合、キュー内の待機中のタスクを順次処理
-              するデーモンモードとなる。
+-              id_range を省略した場合、キュー内の待機中のタスクを順次処理
+-              するデーモンモードとなる。
++              id_range を省略した場合、キュー内の待機中のタスクを順次処理
++              する常駐モードとなる。
               id_range を指定した場合、対象タスクの処理が完了した時点で
               スクリプトは終了する。
 
        -p, --path base_dir channel url ...
-              base_dir を明示的に指定してタスクをキューに登録する。
-              カレントディレクトリ以外の場所からタスクを登録したい場合に
-              使用する。
+-              base_dir を明示的に指定してタスクをキューに登録する。
+-              カレントディレクトリ以外の場所からタスクを登録したい場合に
+-              使用する。
++              base_dir を指定してタスクをキューに登録する。
 
        -m, --modify id_range [-p base_dir] [-c channel] [-u url]
               指定した id_range のタスク情報を変更する。
-              引数として base_dir, channel, url を指定することにより、
-              対象タスクの該当項目をそれぞれ新しい内容に書き換える。
+-              引数として base_dir, channel, url を明示的に指定することに
+-              より、対象タスクの該当項目をそれぞれ新しい内容に書き換える。
++              引数として base_dir, channel, url を指定することにより、
++              対象タスクのBase Dir, Channel, URLを新しい内容に書き換える。
 
        -l, --list [id_range]
               登録されているタスクの一覧を表示する。
@@ -65,7 +81,8 @@ yt-dlp-manager(1)             ユーザーコマンドマニュアル           
 
        -c, --check url ...
               指定された url と一致するタスクが既に登録されていないか
-              確認する。
+-              確認する。
++              確認する。複数の url を指定することも可能である。
 
        -v, --verbose
               デバッグモードを有効にし、タスク実行時における yt-dlp の
@@ -100,11 +117,14 @@ id_range の指定方法 (ID_RANGE SPECIFICATION)
        タスクの登録:
          $ yt-dlp-manager "TechChannel" "https://url1 https://url2"
            Channel を「TechChannel」として、URL を2つキューに登録する。
-           Base Dir はカレントディレクトリとなる。
+-           Base Dir はカレントディレクトリとなる。
++           Base Dir はコマンドを実行したディレクトリとなる。
 
          $ yt-dlp-manager -p ~/Downloads/Videos "MusicChannel" "https://url3"
-           Base Dir を「~/Downloads/Videos」、Channel を「MusicChannel」
-           として、URL を1つキューに登録する。
+-           Base Dir を「~/Downloads/Videos」、Channel を「MusicChannel」
+-           として、URL を1つキューに登録する。
++           Channel を「MusicChannel」として、URL を1つキューに登録する。
++           Base Dir は「~/Downloads/Videos」となる。
 
        タスクの一覧表示:
          $ yt-dlp-manager -l
@@ -119,7 +139,7 @@ id_range の指定方法 (ID_RANGE SPECIFICATION)
             4  MusicChannel   [*] Processing   2026-07-18 12:10:00  -------- --:--:--    ...
             5  AnimeChannel   [-] Waiting      2026-07-18 12:15:00  -------- --:--:--    ...
 
-           各カラムにはタスク of 各構成要素、および以下の情報が表示される。
+           各カラムにはタスクの各構成要素、および以下の情報が表示される。
            Status     タスクの処理状況
                       [-] Waiting      待機中
                       [o] Done         完了
@@ -135,12 +155,14 @@ id_range の指定方法 (ID_RANGE SPECIFICATION)
          $ yt-dlp-manager -l 1:5
            ID が 1 から 5 までのタスクのみを抽出して表示する。
 
-       タスクの実行:
+-       タスクの実行 (EXECUTION):
++       タスクの実行:
          注: 以下のタスクが処理の対象となる。
              Status: Waiting / Interrupted / Failed
 
          $ yt-dlp-manager -s
-           デーモンモードとして起動し、キュー内のタスクを順次処理する。
+-           デーモンモードとして起動し、キュー内のタスクを順次処理する。
++           キュー内のタスクを順次処理する常駐モードを開始する。
 
          $ yt-dlp-manager -s 1:5
            ID が 1 から 5 の範囲内にあるタスクのみを実行する。
@@ -169,9 +191,14 @@ id_range の指定方法 (ID_RANGE SPECIFICATION)
          $ yt-dlp-manager -d 1:3,5,10:12
            指定された ID 範囲のタスクを一括削除する。
 
-       タスクの重複確認:
-         $ yt-dlp-manager -c "https://url1"
-           「https://url1」の URL を持つタスクが既に登録されているか確認する。
+-       重複・状況確認:
++       タスクの重複確認:
+-         $ yt-dlp-manager -c "https://url1"
+-           指定した URL の登録状況（Status や Base Dir 等）をデータベース
+-           から検索して表示する。
++         $ yt-dlp-manager -c "https://url1 https://url2"
++           「https://url1」および「https://url2」の URL を持つタスクが
++           既に登録されているか確認する。
 
 ファイル (FILES)
        ~/.config/yt-dlp-manager/yt-dlp-manager.cfg
