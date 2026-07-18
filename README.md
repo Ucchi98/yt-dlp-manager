@@ -30,9 +30,6 @@ yt-dlp-manager(1)             ユーザーコマンドマニュアル           
        '&' などのシェル特殊文字が含まれる場合は、シェルによる誤解釈を防ぐ
        ため、必ず引数をクォーテーションで囲むか、エスケープする必要がある。
 
-       登録された各タスクには、管理用の識別番号として「ID」（1からの連番）
-       が自動的に割り振られる。
-
        登録された各タスクは、以下の要素で構成される。
        ID         タスクの識別番号（1からの連番が自動的に割り振られる）
        Channel    チャンネル名（保存先ディレクトリ名として使用される）
@@ -101,16 +98,16 @@ id_range の指定方法 (ID_RANGE SPECIFICATION)
 
 例 (EXAMPLES)
        タスクの登録:
-         \$ yt-dlp-manager "TechChannel" "https://url1 https://url2"
+         $ yt-dlp-manager "TechChannel" "https://url1 https://url2"
            Channel を「TechChannel」として、URL を2つキューに登録する。
            Base Dir はカレントディレクトリとなる。
 
-         \$ yt-dlp-manager -p ~/Downloads/Videos "MusicChannel" "https://url3"
+         $ yt-dlp-manager -p ~/Downloads/Videos "MusicChannel" "https://url3"
            Base Dir を「~/Downloads/Videos」、Channel を「MusicChannel」
            として、URL を1つキューに登録する。
 
        タスクの一覧表示:
-         \$ yt-dlp-manager -l
+         $ yt-dlp-manager -l
            現在登録されている全タスクを昇順で表示する。
 
            表示例:
@@ -132,48 +129,48 @@ id_range の指定方法 (ID_RANGE SPECIFICATION)
            Created    タスクがキューに登録された日時
            Finished   タスクが完了した日時
 
-         \$ yt-dlp-manager -l 10
+         $ yt-dlp-manager -l 10
            直近で登録された10件のタスクを降順で表示する。
 
-         \$ yt-dlp-manager -l 1:5
+         $ yt-dlp-manager -l 1:5
            ID が 1 から 5 までのタスクのみを抽出して表示する。
 
        タスクの実行:
          注: 以下のタスクが処理の対象となる。
              Status: Waiting / Interrupted / Failed
 
-         \$ yt-dlp-manager -s
+         $ yt-dlp-manager -s
            デーモンモードとして起動し、キュー内のタスクを順次処理する。
 
-         \$ yt-dlp-manager -s 1:5
+         $ yt-dlp-manager -s 1:5
            ID が 1 から 5 の範囲内にあるタスクのみを実行する。
 
-         \$ yt-dlp-manager -s :5
+         $ yt-dlp-manager -s :5
            ID が 5 までのタスクを順次処理する。
 
-         \$ yt-dlp-manager -v -s
+         $ yt-dlp-manager -v -s
            デバッグモードでタスクを実行し、yt-dlp 内部のコマンド
            実行ログをターミナルに詳細表示する。
 
        タスク情報の修正:
-         \$ yt-dlp-manager -m 1 -u "https://new.url"
+         $ yt-dlp-manager -m 1 -u "https://new.url"
            ID 1 の URL を「https://new.url」に変更する。
 
-         \$ yt-dlp-manager -m 1:5 -c "GamerChannel"
+         $ yt-dlp-manager -m 1:5 -c "GamerChannel"
            ID 1 から 5 の Channel を「GamerChannel」に変更する。
 
-         \$ yt-dlp-manager -m 10: -p ~/NewDir
+         $ yt-dlp-manager -m 10: -p ~/NewDir
            ID 10 から末尾までのタスクの Base Dir を「~/NewDir」に変更する。
 
        タスクの削除:
-         \$ yt-dlp-manager -d 1
+         $ yt-dlp-manager -d 1
            ID 1 のタスクをキューから削除する。
 
-         \$ yt-dlp-manager -d 1:3,5,10:12
+         $ yt-dlp-manager -d 1:3,5,10:12
            指定された ID 範囲のタスクを一括削除する。
 
        タスクの重複確認:
-         \$ yt-dlp-manager -c "https://url1"
+         $ yt-dlp-manager -c "https://url1"
            「https://url1」の URL を持つタスクが既に登録されているか確認する。
 
 ファイル (FILES)
