@@ -45,11 +45,62 @@ fi
 
 CURRENT_PROCESSING_ID=""
 TARGET_RUN_IDS="" # 処理させるIDのSQL用リスト
-VERBOSE_MODE=0    # デバッグログフラグの初期化
+VERBOSE_MODE=0    # yt-dlp のデバッグログフラグの初期化
+DEBUG_MODE=0
 
 # ==========================================
 # 共通関数・ID展開ロジック
 # ==========================================
+# ==========================================
+# ログ出力モジュール
+# ==========================================
+# ANSIカラーコード
+readonly _C_DEBUG="\033[37m"
+readonly _C_INFO="\033[39m"
+readonly _C_SUCCESS="\033[32m"
+readonly _C_WARN="\033[33m"
+readonly _C_ERROR="\033[31m"
+readonly _C_FATAL="\033[1;31m"
+readonly _C_RESET="\033[0m"
+
+log_message() {
+    local level=$1
+    local message=$2
+    local prefix=""
+    local color=""
+    local stream=1
+
+    case "$level" in
+        "DEBUG")   prefix="[Debug]";   color=$_C_DEBUG ;;
+        "INFO")    prefix="[Info]";    color=$_C_INFO ;;
+        "SUCCESS") prefix="[Success]"; color=$_C_SUCCESS ;;
+        "WARN")    prefix="[Warn]";    color=$_C_WARN ;;
+        "ERROR")   prefix="[Error]";   color=$_C_ERROR; stream=2 ;;
+        "FATAL")   prefix="[Fatal]";   color=$_C_FATAL; stream=2 ;;
+        *)         prefix="[Log]";     color=$_C_RESET ;;
+    esac
+
+    if [ "$stream" -eq 2 ]; then
+        echo -e "${color}${prefix}${_C_RESET}: ${message}" >&2
+    else
+        echo -e "${color}${prefix}${_C_RESET}: ${message}"
+    fi
+}
+
+# ショートカット関数
+log_newline() { echo "";                    }
+log_fatal()   { log_message "FATAL"   "$1"; }
+log_error()   { log_message "ERROR"   "$1"; }
+log_warn()    { log_message "WARN"    "$1"; }
+log_info()    { log_message "INFO"    "$1"; }
+log_success() { log_message "SUCCESS" "$1"; }
+log_debug() {
+    if [ "$DEBUG_MODE" = true ]; then
+        log_message "DEBUG" "$1"
+    fi
+}
+
+# Usage表示関数
 show_help() {
     cat << EOF
 Usage:
@@ -185,7 +236,7 @@ parse_and_expand_ids() {
         elif [[ "$part" =~ ^[0-9]+$ ]]; then
             expanded_ids+=("$part")
         else
-            echo "Error: Invalid ID format '$part'." >&2
+            log_error "Invalid ID format '$part'."
             return 1
         fi
     done
@@ -223,9 +274,9 @@ validate_and_filter_active_ids() {
         local row=$(sqlite3 "$DB_PATH" "SELECT done FROM t_url WHERE id = $id;" | xargs)
         
         if [ -z "$row" ]; then
-            continue # 存在しない行は静かにスキップ
+            continue
         elif [ "$row" = "2" ]; then
-            echo "Notice: ID $id is currently [Processing]. Skipped."
+            log_info "ID $id is currently [Processing]. Skipped."
             continue
         fi
         filtered_ids+=("$id")
@@ -313,7 +364,7 @@ print_process_box() {
 # 常駐モード用関数
 # ==========================================
 recover_interrupted_tasks() {
-    echo "Checking for interrupted tasks from previous run..."
+    log_debug "Checking for interrupted tasks from previous run..."
     local sql_cmd="UPDATE t_url SET done = -1, processed_at = DATETIME('now', 'localtime') WHERE done = 2"
     if [ -n "$TARGET_RUN_IDS" ]; then
         sql_cmd="$sql_cmd AND id IN ($TARGET_RUN_IDS);"
@@ -351,7 +402,7 @@ execute_external_process() {
 
     if [ "$VERBOSE_MODE" -eq 1 ]; then
         ARGS+=("--verbose")
-        echo "--- yt-dlp Debug Log Start (ID: $id) ---"
+        log_debug "yt-dlp Debug Log Start (ID: $id)"
     else
         ARGS+=("-q")
     fi
@@ -359,18 +410,18 @@ execute_external_process() {
     "${YTDLP_BIN}" "${ARGS[@]}" "$url"
     local status=$?
     if [ "$VERBOSE_MODE" -eq 1 ]; then
-        echo "--- yt-dlp Debug Log End (Exit Code: $status) ---"
+        log_debug "yt-dlp Debug Log End (Exit Code: $status)"
     fi
     return $status
 }
 
 run_daemon_loop() {
-    echo "Persistent mode started. Listening to database..."
+    log_debug "Persistent mode started. Listening to database..."
     if [ "$VERBOSE_MODE" -eq 1 ]; then
-        echo "Verbose mode enabled. Displaying all yt-dlp logs."
+        log_debug "Verbose mode enabled. Displaying all yt-dlp logs."
     fi
     if [ -n "$TARGET_RUN_IDS" ]; then
-        echo "Processing specified ID(s) only: $TARGET_RUN_IDS"
+        log_debug "Processing specified ID only: $TARGET_RUN_IDS"
     fi
 
     while true; do
@@ -383,7 +434,7 @@ run_daemon_loop() {
         local target_id=$(sqlite3 "$DB_PATH" "$sql_query")
         if [ -z "$target_id" ]; then
             if [ -n "$TARGET_RUN_IDS" ]; then
-                echo "All specified tasks completed. Exiting..."
+                log_success "All specified tasks completed. Exiting..."
                 exit 0
             fi
             sleep "$INTERVAL"
@@ -428,23 +479,23 @@ show_recent_urls() {
         # 【仕様変更】引数なしの場合は、全件を昇順（ASC）で表示
         limit_sql=""
         order_sql="ORDER BY id ASC"
-        echo "=== All Registered URLs (Oldest First) ==="
+        log_debug "All Registered URLs (Oldest First)"
     elif [[ "$limit_input" =~ ^[0-9]+$ ]]; then
         # 件数指定の場合のみ、直近のデータを取得するため降順（DESC）のまま維持
         limit_sql="LIMIT $limit_input"
         order_sql="ORDER BY id DESC"
-        echo "=== Recent $limit_input Registered URLs ==="
+        log_debug "Recent $limit_input Registered URLs"
     else
         local id_list_sql=$(parse_and_expand_ids "$limit_input")
         if [ $? -ne 0 ] || [ -z "$id_list_sql" ]; then 
-            echo "Error: ID parsing failed for list option. Aborted." >&2
+            log_error "ID parsing failed for list option. Aborted."
             exit 1
         fi
         where_sql="WHERE id IN ($id_list_sql)"
         limit_sql=""
         # 【仕様変更】指定ID表示時も昇順（ASC）で出力
         order_sql="ORDER BY id ASC"
-        echo "=== Displaying Specified ID(s): $id_list_sql ==="
+        log_debug "Displaying Specified ID: $id_list_sql"
     fi
 
     # 【修正】ヒアドキュメント（<<EOF）を正しく復元し、SQLiteの整形モードを完全に有効化
@@ -513,18 +564,18 @@ delete_url_by_ids() {
     local id_input="$1"
     local id_list_sql=$(parse_and_expand_ids "$id_input")
     if [ -z "$id_list_sql" ]; then
-        echo "Error: ID parsing failed. Aborted." >&2
+        log_error "Specified IDs are invalid. Aborted."
         exit 1
     fi
 
     local clean_ids=$(validate_and_filter_active_ids "$id_list_sql")
     if [ -z "$clean_ids" ]; then
-        echo "Warning: Specified ID(s) are invalid or currently processing. Operation aborted."
-        exit 0
+        log_error "Specified tasks are invalid or currently processing. Aborted."
+        exit 1
     fi
 
     sqlite3 "$DB_PATH" "DELETE FROM t_url WHERE id IN ($clean_ids);"
-    echo "Successfully deleted ID(s): $clean_ids"
+    log_success "Successfully deleted IDs: $clean_ids"
     exit 0
 }
 
@@ -555,12 +606,12 @@ insert_urls() {
     done
 
     if [ -z "$values_sql" ]; then 
-        echo "Error: No valid URLs provided." >&2
+        log_error "No valid URLs provided."
         exit 1
     fi
 
     local inserted_count=$(sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO t_url (channel, url, base_dir) VALUES $values_sql; SELECT changes();")
-    echo "Successfully registered $inserted_count task(s)."
+    log_success "Successfully registered $inserted_count task(s)."
 }
 
 modify_url_records() {
@@ -570,24 +621,24 @@ modify_url_records() {
     local mod_url="$4"
     
     if [ -z "$mod_path" ] && [ -z "$mod_channel" ] && [ -z "$mod_url" ]; then 
-        echo "Error: Nothing to modify." >&2
+        log_error "Nothing to modify."
         exit 1
     fi
 
     local id_list_sql=$(parse_and_expand_ids "$id_input")
     if [ -z "$id_list_sql" ]; then 
-        echo "Error: ID parsing failed. Aborted." >&2
+        log_error "ID parsing failed. Aborted."
         exit 1
     fi
 
     local clean_ids=$(validate_and_filter_active_ids "$id_list_sql")
     if [ -z "$clean_ids" ]; then
-        echo "Warning: Specified ID(s) are invalid or currently processing. Operation aborted."
+        log_error "Specified tasks are invalid or currently processing. Aborted."
         exit 0
     fi
 
     if [ "$(echo "$clean_ids" | grep -c ',')" -gt 0 ] && [ -n "$mod_url" ]; then 
-        echo "Error: Cannot update URL (-u) when multiple IDs are specified. Operation aborted." >&2
+        log_error "Cannot update URL (-u) when multiple IDs are specified. Aborted."
         exit 1
     fi
 
@@ -610,7 +661,7 @@ modify_url_records() {
 
     if [ -n "$update_set" ]; then
         sqlite3 "$DB_PATH" "UPDATE t_url SET $update_set WHERE id IN ($clean_ids);"
-        echo "Successfully updated record(s) for ID(s): $clean_ids"
+        log_success "Successfully updated record(s) for ID(s): $clean_ids"
     fi
     exit 0
 }
@@ -619,7 +670,7 @@ check_url_exists() {
     local url_input="$1" 
     local check_array=($url_input)
 
-    echo "=== URL Duplicate Check ==="
+    log_debug "URL Duplicate Check"
     for url in "${check_array[@]}"; do
         [ -z "$url" ] && continue
         local row=$(sqlite3 "$DB_PATH" "SELECT id, channel, done FROM t_url WHERE url = '$(echo "$url" | sed "s/'/''/g")';")
@@ -633,16 +684,17 @@ check_url_exists() {
                 3) st="Interrupted" ;; 
                 *) st="Failed" ;; 
             esac
-            echo "[EXISTS] $url -> ID: $(echo "$row" | cut -d'|' -f1) ($(echo "$row" | cut -d'|' -f2), $st)"
+            log_info "[EXISTS] $url -> ID: $(echo "$row" | cut -d'|' -f1) ($(echo "$row" | cut -d'|' -f2), $st)"
         else
-            echo "[NEW]    $url"
+            log_info "[NEW]    $url"
         fi
     done
     exit 0
 }
 
 handle_immediate_shutdown() {
-    echo -e "\nWarning: Interrupt signal (Ctrl+C) detected. Aborting process..."
+    log_newline
+    log_warn "Interrupt signal (Ctrl+C) detected. Aborting process..."
     if [ -n "$CURRENT_PROCESSING_ID" ]; then
         sqlite3 "$DB_PATH" "UPDATE t_url SET done = 3, processed_at = DATETIME('now', 'localtime') WHERE id = $CURRENT_PROCESSING_ID;"
     fi
@@ -654,49 +706,71 @@ bootstrap_application
 init_database
 
 # ==========================================
-# 先行オプション事前解析 (プリパース)
+# メイン処理 (メインオプション解析)
 # ==========================================
-for arg in "$@"; do
-    if [ "$arg" = "-v" ] || [ "$arg" = "--verbose" ]; then
-        VERBOSE_MODE=1
-    fi
-done
+start_download_tasks() {
+    shift  # "-s" または "--start" を破棄
 
-PURE_ARGS=()
-for arg in "$@"; do
-    if [ "$arg" != "-v" ] && [ "$arg" != "--verbose" ]; then
-        PURE_ARGS+=("$arg")
-    fi
-done
+    case "$#" in
+        0) 
+            ;;
+        1)
+            # -s [id_range]
+            TARGET_RUN_IDS=$(parse_and_expand_ids "$1")
+            if [ -z "$TARGET_RUN_IDS" ]; then
+                log_error "Task IDs not found."
+                exit 1
+            fi
+            ;;
+        2)
+            # -s [id_range] -v のパターン
+            if [ "$VERBOSE_MODE" -eq 1 ]; then
+                log_error "Invalid usage of -v option."
+                exit 1
+            fi
 
-# 【バグ修正】配列の最初の要素を明確に指定して文字列比較を行う
-if [ "${PURE_ARGS[0]}" = "-s" ] || [ "${PURE_ARGS[0]}" = "--start" ]; then
-    if [ ${#PURE_ARGS[@]} -gt 2 ]; then
-        echo "Error: Too many arguments for start option." >&2
-        exit 
-    fi
-    # 2. 2番目の引数（インデックス1）が存在する場合は指名IDとして処理
-    if [ -n "${PURE_ARGS[1]}" ]; then
-        TARGET_RUN_IDS=$(parse_and_expand_ids "${PURE_ARGS[1]}")
-        if [ -z "$TARGET_RUN_IDS" ]; then 
-            cyan="\e[36;1m"
-            reset="\e[0m"
-            echo -e "${cyan}Info:${reset} The specified selection [${PURE_ARGS[1]}] is already complete. Aborted."
-            exit 0
-        fi
-    fi
+            if [[ "$2" =~ ^-(v|-verbose)$ ]]; then
+                VERBOSE_MODE=1
+            else
+                log_error "Invalid usage of -s option."
+                exit 1
+            fi
+
+            TARGET_RUN_IDS=$(parse_and_expand_ids "$1")
+            if [ -z "$TARGET_RUN_IDS" ]; then
+                log_error "Task IDs not found."
+                exit 1
+            fi
+            ;;
+        *)
+            log_error "Too many arguments."
+            exit 1
+            ;;
+    esac
+
     recover_interrupted_tasks
     run_daemon_loop
     exit 0
-fi
+}
 
-# ==========================================
-# メイン処理 (メインオプション解析)
-# ==========================================
 case "$1" in
+    "-s"|"--start")
+        start_download_tasks "$@"
+        ;;
+
+    "-v"|"--verbose")
+        if [[ ! "$2" =~ ^-(s|-start)$ ]]; then
+            log_error "Invalid usage of -v option."
+            exit 1
+        fi
+        VERBOSE_MODE=1
+        shift 
+        start_download_tasks "$@"
+        ;;
+
     "-m"|"--modify")
         if [ -z "$2" ]; then
-            echo "Error: Missing arguments." >&2
+            log_error "Missing arguments."
             exit 1
         fi
         
@@ -713,7 +787,7 @@ case "$1" in
                 "-c") mod_channel="$2"; shift 2 ;;
                 "-u") mod_url="$2"; shift 2 ;;
                 *)
-                    echo "Error: Unknown option '$1'." >&2
+                    log_error "Unknown option '$1'."
                     exit 1
                     ;;
             esac
@@ -722,7 +796,7 @@ case "$1" in
         ;;
     "-p"|"--path")
         if [ "$#" -lt 4 ]; then
-            echo "Error: Missing arguments." >&2
+            log_error "Missing arguments."
             exit 1
         fi
         insert_urls "$3" "$4" "$2"
@@ -732,14 +806,14 @@ case "$1" in
         ;;
     "-d"|"--delete")
         if [ -z "$2" ]; then
-            echo "Error: Missing arguments." >&2
+            log_error "Missing arguments."
             exit 1
         fi
         delete_url_by_ids "$2"
         ;;
     "-c"|"--check")
         if [ -z "$2" ]; then
-            echo "Error: Missing arguments." >&2
+            log_error "Missing arguments."
             exit 1
         fi
         check_url_exists "$2"
