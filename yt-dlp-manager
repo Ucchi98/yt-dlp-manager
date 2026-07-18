@@ -417,18 +417,18 @@ show_recent_urls() {
     output_data=$(sqlite3 "$DB_PATH" <<EOF
 .headers on
 .mode column
-SELECT id, channel, 
+SELECT id AS ID, channel AS Channel, 
     CASE done 
         WHEN 0 THEN '[-] Waiting' 
         WHEN 2 THEN '[*] Processing' 
         WHEN 1 THEN '[o] Done' 
         WHEN 3 THEN '[!] Interrupted' 
         ELSE '[x] Failed' 
-    END AS status, 
+    END AS Status, 
     created_at AS Created, 
     COALESCE(processed_at, '-------- --:--:--') AS Processed, 
-    base_dir, 
-    url 
+    base_dir AS 'Base Dir', 
+    url AS URL 
 FROM t_url 
 $where_sql 
 $order_sql 
