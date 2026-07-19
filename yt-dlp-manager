@@ -25,8 +25,8 @@ DEFAULT_FFMPEG_DIR="/usr/local/bin"
 DEFAULT_YTDLP_CONFIG_FILE="${APP_DIR}/config.txt"
 DEFAULT_YTDLP_COOKIE_FILE="${APP_DIR}/cookie.txt"
 DEFAULT_YTDLP_ARCHIVE_FILE="${APP_DIR}/archive.txt"
-DEFAULT_OUTPUT_TEMPLATE="%(title).200B_%(resolution)s [%(id)s].%(ext)s"
-DEFAULT_PROGRESS_TEMPLATE="    Download: %(progress._percent_str)s of %(progress._total_bytes_str)s at %(progress._speed_str)s ETA %(progress._eta_str)s"
+DEFAULT_YTDLP_OUTPUT_TEMPLATE="%(title).200B_%(resolution)s [%(id)s].%(ext)s"
+DEFAULT_YTDLP_PROGRESS_TEMPLATE="    Download: %(progress._percent_str)s of %(progress._total_bytes_str)s at %(progress._speed_str)s ETA %(progress._eta_str)s"
 
 INTERVAL=5
 
@@ -43,8 +43,8 @@ fi
 : "${YTDLP_CONFIG_FILE:=$DEFAULT_YTDLP_CONFIG_FILE}"
 : "${YTDLP_COOKIE_FILE:=$DEFAULT_YTDLP_COOKIE_FILE}"
 : "${YTDLP_ARCHIVE_FILE:=$DEFAULT_YTDLP_ARCHIVE_FILE}"
-: "${OUTPUT_TEMPLATE:=$DEFAULT_OUTPUT_TEMPLATE}"
-: "${PROGRESS_TEMPLATE:=$DEFAULT_PROGRESS_TEMPLATE}"
+: "${YTDLP_OUTPUT_TEMPLATE:=$DEFAULT_YTDLP_OUTPUT_TEMPLATE}"
+: "${YTDLP_PROGRESS_TEMPLATE:=$DEFAULT_YTDLP_PROGRESS_TEMPLATE}"
 
 CURRENT_PROCESSING_ID=""
 TARGET_RUN_IDS="" # 処理させるIDのSQL用リスト
@@ -169,26 +169,7 @@ create_default_app_config() {
 #YTDLP_BIN="/usr/local/bin/yt-dlp"
 
 # ------------------------------------------
-# 2. Deno バイナリの絶対パス
-# ------------------------------------------
-# [標準デフォルト値]: /usr/local/bin/deno
-#DENO_BIN="/usr/local/bin/deno"
-
-# ------------------------------------------
-# 3. ffmpeg の設置ディレクトリ（親フォルダ）
-# ------------------------------------------
-# [標準デフォルト値]: /usr/local/bin
-#FFMPEG_DIR="/usr/local/bin"
-
-# ------------------------------------------
-# 4. 各種表示・出力ファイル名のテンプレート
-# ------------------------------------------
-# 未指定時はスクリプト内の内蔵デフォルト値が適用されます。
-#OUTPUT_TEMPLATE="%(title).200B_%(resolution)s [%(id)s].%(ext)s"
-#PROGRESS_TEMPLATE="    Download:[download] Id: %(info.id)s | %(progress._percent_str)s of %(progress._total_bytes_str)s at %(progress._speed_str)s ETA %(progress._eta_str)s"
-
-# ------------------------------------------
-# 5. 各種管理ファイルの個別カスタムパス
+# 2. 各種管理ファイルの個別カスタムパス
 # ------------------------------------------
 # 未指定（コメントアウト）時は ~/.config/yt-dlp-manager/ 内に自動作成されます。
 # パスにチルダ「~」を含めると正常に読み込めない場合があるため、
@@ -240,8 +221,8 @@ create_default_ytdlp_config() {
 --part
 --download-archive "$YTDLP_ARCHIVE_FILE"
 --progress
---progress-template "${PROGRESS_TEMPLATE}"
---output "${OUTPUT_TEMPLATE}"
+--progress-template "${YTDLP_PROGRESS_TEMPLATE}"
+--output "${YTDLP_OUTPUT_TEMPLATE}"
 
 # ------------------------------------------------------------------------------
 # 5. Post-Download Commands (Exec Hooks)
