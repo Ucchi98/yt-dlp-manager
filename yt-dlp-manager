@@ -181,10 +181,21 @@ create_default_app_config() {
 #FFMPEG_DIR="/usr/local/bin"
 
 # ------------------------------------------
-# 4. 動画保存時の出力ファイル名テンプレート
+# 4. 各種表示・出力ファイル名のテンプレート
 # ------------------------------------------
-# [標準デフォルト値]: %(title).200B_%(resolution)s [%(id)s].%(ext)s
+# 未指定時はスクリプト内の内蔵デフォルト値が適用されます。
 #OUTPUT_TEMPLATE="%(title).200B_%(resolution)s [%(id)s].%(ext)s"
+#PROGRESS_TEMPLATE="    Download:[download] Id: %(info.id)s | %(progress._percent_str)s of %(progress._total_bytes_str)s at %(progress._speed_str)s ETA %(progress._eta_str)s"
+
+# ------------------------------------------
+# 5. 各種管理ファイルの個別カスタムパス
+# ------------------------------------------
+# 未指定（コメントアウト）時は ~/.config/yt-dlp-manager/ 内に自動作成されます。
+# パスにチルダ「~」を含めると正常に読み込めない場合があるため、
+# フルパス（/home/ユーザー名/... または ${HOME}/...）での記述を推奨します。
+#YTDLP_CONFIG_FILE="${HOME}/.config/yt-dlp-manager/config.txt"
+#YTDLP_COOKIE_FILE="${HOME}/.config/yt-dlp-manager/cookie.txt"
+#YTDLP_ARCHIVE_FILE="${HOME}/.config/yt-dlp-manager/archive.txt"
 EOF
 }
 
