@@ -97,9 +97,9 @@ id_range の指定方法 (ID_RANGE SPECIFICATION)
            Channel を「TechChannel」として、URL を2つキューに登録する。
            Base Dir はコマンドを実行したディレクトリとなる。
 
-         $ yt-dlp-manager -p ~/Downloads/Videos "MusicChannel" "https://url3"
+         $ yt-dlp-manager -p /Downloads/Videos "MusicChannel" "https://url3"
            Channel を「MusicChannel」として、URL を1つキューに登録する。
-           Base Dir は「~/Downloads/Videos」となる。
+           Base Dir は「/Downloads/Videos」となる。
 
        タスクの一覧表示:
          $ yt-dlp-manager -l
@@ -154,8 +154,8 @@ id_range の指定方法 (ID_RANGE SPECIFICATION)
          $ yt-dlp-manager -m 1:5 -c "GamerChannel"
            ID 1 から 5 の Channel を「GamerChannel」に変更する。
 
-         $ yt-dlp-manager -m 10: -p ~/NewDir
-           ID 10 から末尾までのタスクの Base Dir を「~/NewDir」に変更する。
+         $ yt-dlp-manager -m 10: -p /Downloads/NewDir
+           ID 10 から末尾までのタスクの Base Dir を「/Downloads/NewDir」に変更する。
 
        タスクの削除:
          $ yt-dlp-manager -d 1

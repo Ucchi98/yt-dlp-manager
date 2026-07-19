@@ -98,9 +98,9 @@ EXAMPLES
            Registers two URLs into the queue with Channel set to "TechChannel".
            The Base Dir becomes the directory from which the command was run.
 
-         $ yt-dlp-manager -p ~/Downloads/Videos "MusicChannel" "https://url3"
+         $ yt-dlp-manager -p /Downloads/Videos "MusicChannel" "https://url3"
            Registers one URL into the queue with Channel set to "MusicChannel".
-           The Base Dir becomes "~/Downloads/Videos".
+           The Base Dir becomes "/Downloads/Videos".
 
        Task Listing:
          $ yt-dlp-manager -l
@@ -154,8 +154,8 @@ EXAMPLES
          $ yt-dlp-manager -m 1:5 -c "GamerChannel"
            Changes the Channel of IDs 1 through 5 to "GamerChannel".
 
-         $ yt-dlp-manager -m 10: -p ~/NewDir
-           Changes the Base Dir of tasks from ID 10 to the end of the queue to "~/NewDir".
+         $ yt-dlp-manager -m 10: -p /Downloads/NewDir
+           Changes the Base Dir of tasks from ID 10 to the end of the queue to "/Downloads/NewDir".
 
        Deleting Tasks:
          $ yt-dlp-manager -d 1
