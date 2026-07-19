@@ -459,24 +459,24 @@ execute_external_process() {
 
 process_queued_tasks() {
     log_debug "Persistent mode started. Listening to database..."
-
+    
     # 常駐モード用：最後に処理したIDを保持
     local last_processed_id=0
 
     while true; do
-        # 1. 処理対象の取得
+        # 1. 処理対象リストの取得
         local target_ids_sql=""
         if [ -n "$TARGET_RUN_IDS" ]; then
-            # 範囲指定がある場合は全件取得し、ループ終了後に終了する
-            target_ids_sql="SELECT id FROM t_url WHERE id IN ($TARGET_RUN_IDS) AND done IN (0, 3) ORDER BY id ASC;"
+            # 範囲指定がある場合：指定IDのみ、未処理(-1, 0, 3)を全件取得
+            target_ids_sql="SELECT id FROM t_url WHERE id IN ($TARGET_RUN_IDS) AND done IN (-1, 0, 3) ORDER BY id ASC;"
         else
-            # 常駐モードでは「最後に処理したID」以降のタスクを追跡
-            target_ids_sql="SELECT id FROM t_url WHERE id > $last_processed_id AND done IN (0, 3) ORDER BY id ASC;"
+            # 常駐モード：前回以降の未処理IDを抽出
+            target_ids_sql="SELECT id FROM t_url WHERE id > $last_processed_id AND done IN (-1, 0, 3) ORDER BY id ASC;"
         fi
 
         local id_list=($(sqlite3 "$DB_PATH" "$target_ids_sql"))
 
-        # 2. タスクがない場合の処理
+        # 2. リストが空の場合の判定
         if [ ${#id_list[@]} -eq 0 ]; then
             if [ -n "$TARGET_RUN_IDS" ]; then
                 log_success "All specified tasks completed. Exiting..."
@@ -488,10 +488,13 @@ process_queued_tasks() {
 
         # 3. ループ処理
         for target_id in "${id_list[@]}"; do
+            # アトミックなステータス更新（複数プロセス対策）
+            local updated=$(sqlite3 "$DB_PATH" "UPDATE t_url SET done = 2, processed_at = DATETIME('now', 'localtime') WHERE id = $target_id AND done IN (-1, 0, 3) RETURNING id;")
+            [ -z "$updated" ] && continue
+
             CURRENT_PROCESSING_ID="$target_id"
             
-            sqlite3 "$DB_PATH" "UPDATE t_url SET done = 2, processed_at = DATETIME('now', 'localtime') WHERE id = $target_id;"
-            
+            # 各カラムを個別取得
             local channel=$(sqlite3 "$DB_PATH" "SELECT channel FROM t_url WHERE id = $target_id;")
             local url=$(sqlite3 "$DB_PATH" "SELECT url FROM t_url WHERE id = $target_id;")
             local record_base_dir=$(sqlite3 "$DB_PATH" "SELECT base_dir FROM t_url WHERE id = $target_id;")
@@ -504,12 +507,12 @@ process_queued_tasks() {
                 sqlite3 "$DB_PATH" "UPDATE t_url SET done = -1, processed_at = DATETIME('now', 'localtime') WHERE id = $target_id;"
             fi
             
-            # 常駐モードの場合のみIDを更新（範囲指定モードでは不要）
+            # 範囲指定モード以外でのみ更新
             [ -z "$TARGET_RUN_IDS" ] && last_processed_id=$target_id
             CURRENT_PROCESSING_ID=""
         done
-
-        # 範囲指定モードの場合は、一通りのリスト処理が終わったらループを抜けて終了
+        
+        # 範囲指定モードの場合は、一通りの処理完了後に終了
         if [ -n "$TARGET_RUN_IDS" ]; then
             log_success "All specified tasks completed. Exiting..."
             exit 0
