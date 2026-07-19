@@ -654,26 +654,56 @@ insert_task() {
     fi
 
     local url_array=($url_input) 
-    local values_sql=""
+    local total_urls=0
+    local before_count=0
+    local after_count=0
+
+    # 1件以上有効なURLがあるか事前チェック
+    local has_valid_url=0
     for url in "${url_array[@]}"; do
         if [ -n "$url" ]; then
-            if [ -n "$values_sql" ]; then
-                values_sql+=", "
-            fi
-            local safe_ch=$(echo "$channel" | sed "s/'/''/g")
-            local safe_url=$(echo "$url" | sed "s/'/''/g")
-            local safe_base=$(echo "$base_dir_to_save" | sed "s/'/''/g")
-            values_sql+="('$safe_ch', '$safe_url', '$safe_base')"
+            has_valid_url=1
+            ((total_urls++))
         fi
     done
 
-    if [ -z "$values_sql" ]; then 
+    if [ "$has_valid_url" -eq 0 ] || [ "$total_urls" -eq 0 ]; then 
         log_error "No valid URLs provided."
         exit 1
     fi
 
-    local inserted_count=$(sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO t_url (channel, url, base_dir) VALUES $values_sql; SELECT changes();")
-    log_success "Successfully registered $inserted_count task(s)."
+    # 【確実な件数計算】インサート実行前の総レコード数を取得
+    before_count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM t_url;")
+
+    # SQLiteの対話モードを利用し、トランザクション内で安全に連続インサート
+    sqlite3 "$DB_PATH" <<EOF
+BEGIN TRANSACTION;
+.param init
+.param set \$ch '$(echo "$channel" | sed "s/'/''/g")'
+.param set \$base '$(echo "$base_dir_to_save" | sed "s/'/''/g")'
+$(
+for url in "${url_array[@]}"; do
+    [ -z "$url" ] && continue
+    cat <<INNER_EOF
+.param set \$url '$(echo "$url" | sed "s/'/''/g")'
+INSERT OR IGNORE INTO t_url (channel, url, base_dir) VALUES (\$ch, \$url, \$base);
+INNER_EOF
+done
+)
+COMMIT;
+EOF
+
+    # インサート実行後の総レコード数を取得
+    after_count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM t_url;")
+
+    # 差分から「実際に新しく追加された件数」を計算
+    local inserted_count=$((after_count - before_count))
+
+    if [ "$inserted_count" -gt 0 ]; then
+        log_success "Successfully registered $inserted_count task(s)."
+    else
+        log_warning "No new tasks were registered (URLs might already exist)."
+    fi
 }
 
 modify_task_by_ids() {
@@ -705,27 +735,28 @@ modify_task_by_ids() {
         exit 1
     fi
 
-    local update_set=""
+    # パスのチルダ展開
     if [ -n "$mod_path" ]; then
-        update_set="base_dir = '$(echo "$mod_path" | sed "s|^~|${HOME}|" | sed "s/'/''/g")'"
-    fi
-    if [ -n "$mod_channel" ]; then 
-        if [ -n "$update_set" ]; then
-            update_set+=", "
-        fi
-        update_set+="channel = '$(echo "$mod_channel" | sed "s/'/''/g")'"
-    fi
-    if [ -n "$mod_url" ]; then 
-        if [ -n "$update_set" ]; then
-            update_set+=", "
-        fi
-        update_set+="url = '$(echo "$mod_url" | sed "s/'/''/g")'"
+        mod_path=$(echo "$mod_path" | sed "s|^~|${HOME}|")
     fi
 
-    if [ -n "$update_set" ]; then
-        sqlite3 "$DB_PATH" "UPDATE t_url SET $update_set WHERE id IN ($clean_ids);"
-        log_success "Successfully updated record(s) for ID(s): $clean_ids"
-    fi
+    # 各パラメータが空（指定なし）の場合は NULL としてバインドし、
+    # SQL内の COALESCE(? , 原本のカラム名) を使って「指定があった場合のみ更新」を安全に実現します。
+    sqlite3 "$DB_PATH" <<EOF
+.param init
+.param set \$mod_path $([ -n "$mod_path" ] && echo "'$(echo "$mod_path" | sed "s/'/''/g")'" || echo "NULL")
+.param set \$mod_ch   $([ -n "$mod_channel" ] && echo "'$(echo "$mod_channel" | sed "s/'/''/g")'" || echo "NULL")
+.param set \$mod_url  $([ -n "$mod_url" ] && echo "'$(echo "$mod_url" | sed "s/'/''/g")'" || echo "NULL")
+
+UPDATE t_url 
+SET 
+    base_dir = COALESCE(\$mod_path, base_dir),
+    channel  = COALESCE(\$mod_ch, channel),
+    url      = COALESCE(\$mod_url, url)
+WHERE id IN ($clean_ids);
+EOF
+
+    log_success "Successfully updated record(s) for ID(s): $clean_ids"
     exit 0
 }
 
